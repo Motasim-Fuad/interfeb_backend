@@ -1,0 +1,28 @@
+Interfab QC V7 verification
+===========================
+
+Backend
+- python3 -m compileall -q app alembic: PASS
+- smoke_test_core.py: PASS
+- Supplier profile / Fabric Receive / PLM cascade: PASS
+- 4-Point / GSM / Moisture / Skew / Shrinkage / Relaxation / Correlation / Factory formulas: PASS
+- Correlation endpoint remains derived from Dashboard mill planning + 4-point inspection: PASS
+
+Factory App V7 fixes
+- Correlation page no longer waits for all 10 report APIs; it loads correlation directly: FIXED
+- Fresh PLM context is re-fetched before opening inspection details/modules: FIXED
+- Shade Check no longer blocks on per-roll planned yardage: FIXED
+- Shade "Cons" uses planned roll-count context rather than duplicate yardage input: FIXED
+- Previous-PLM report state is cleared before loading another PLM: FIXED
+- Modified Dart files local-import audit: PASS
+- Modified Dart files delimiter/bracket audit: PASS
+
+Dashboard V7 fixes
+- Clicking outside an input unfocuses the active field globally: FIXED
+- Input decoration spacing/floating-label readability improved: FIXED
+- Supplier QC Profile expansion children have safe top spacing so floating labels are not obscured: FIXED
+- Dashboard Dart local-import audit: PASS
+- Dashboard modified Dart delimiter/bracket audit: PASS
+
+Environment limitation
+- Flutter/Dart SDK is not installed in this execution environment, therefore flutter analyze and device/iOS/Android builds were not executed or claimed.

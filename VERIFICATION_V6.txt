@@ -1,0 +1,43 @@
+Interfab QC V6 verification
+===========================
+
+Backend
+- python3 -m compileall -q app alembic: PASS
+- smoke_test_core.py: PASS
+- DB tables in smoke DB: 41
+- Supplier profile atomic save/defaults/unit: PASS
+- Fabric Receive finalized QC validation/version snapshot: PASS
+- PLM cascade + QC snapshot + consignment lock: PASS
+- Bulk roll idempotency: PASS
+- Shade supplier snapshot/history: PASS
+- 4-Point dynamic defects/history/weighted area/upsert: PASS
+- GSM snapshot/upsert/formula: PASS
+- Moisture formula: PASS
+- Skew formula + width/type acceptance amount: PASS
+- Shrinkage formula: PASS
+- Relaxation formula: PASS
+- Correlation formula/derived factory side: PASS
+- Factory idempotent/percentage: PASS
+- Alembic heads: a62d9f713c20 (single head)
+- docker-compose.yml YAML parse: PASS (api, db, redis)
+
+Canonical PDF
+- Smoke PDFs generated: 4-Point, GSM, Skew, Shade, Correlation, Factory
+- All generated PDFs rendered to PNG using the PDF verification renderer: PASS
+- Visual check for clipping/overflow on latest renders: PASS
+- GSM empty After Wash section does not claim PASS: PASS
+
+Flutter source audit
+- Factory App Dart files: 110
+- Dashboard Dart files: 51
+- Relative/local imports: PASS
+- Delimiter/bracket audit: PASS
+- Required AppTextField hintText audit: PASS
+- Suspicious missing comma before named text args audit: PASS
+- ScreenUtil references: 0
+- Create New PLM references: 0
+- Legacy Skew profile fields in App: 0
+- Relaxation accepted-standard UI references: 0
+
+Environment limitation
+- Flutter/Dart SDK is not installed in this execution environment, therefore `flutter analyze` and device/iOS/Android builds were NOT claimed or executed here.
