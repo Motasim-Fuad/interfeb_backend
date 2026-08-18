@@ -7,14 +7,16 @@ from app.core.database import get_db
 from app.core.deps import require_roles
 from app.features.skew_bowing import models, schemas, service
 from app.features.inspection_report.service import upsert_inspection_report
-from app.features.attachments.service import get_attachments
+from app.features.attachments.service import get_attachments, attach_stage_photos
 from app.features.plm.models import Plm
 from app.features.store.service import require_qc_float, get_qc_value
+from app.core.roll_payload import merge_roll_fields, require_before_wash_first
 
 router=APIRouter(prefix="/skew-bowing",tags=["Skew & Bowing"])
 
 def _attach(db,report):
     report.attachments=get_attachments(db,"skew_bowing_report",report.id)
+    attach_stage_photos(db, report, before_type="skew_before_wash", after_type="skew_after_wash")
     std=float(report.standard_point_snapshot) if report.standard_point_snapshot is not None else None
     for roll in report.rolls:
         roll.attachments=get_attachments(db,"skew_bowing_roll",roll.id)
@@ -69,10 +71,11 @@ def upsert_roll(report_id:UUID,payload:schemas.RollIn,db:Session=Depends(get_db)
     # Percentage is derived only from AC/BD; no hidden reference length is needed.
     data["reference_fabric_length"]=None
     roll=db.query(models.SkewBowingRoll).filter(models.SkewBowingRoll.report_id==report_id,models.SkewBowingRoll.roll_no==payload.roll_no).first()
+    require_before_wash_first(roll, data, ("ac_value_before","bd_value_before"), ("ac_value_after","bd_value_after"))
     if roll:
-        for k,v in data.items():setattr(roll,k,v)
+        merge_roll_fields(roll, data)
     else:
-        roll=models.SkewBowingRoll(report_id=report_id,**data);db.add(roll)
+        roll=models.SkewBowingRoll(report_id=report_id,**{k:v for k,v in data.items() if v is not None or k=="roll_no"});db.add(roll)
     db.commit();db.refresh(roll)
     upsert_inspection_report(db,plm_id=report.plm_id,roll_number=roll.roll_no,color_name=roll.colour_code,module_field="skew_report_id",module_row_id=roll.id);db.commit()
     roll.attachments=get_attachments(db,"skew_bowing_roll",roll.id)

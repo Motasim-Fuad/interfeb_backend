@@ -10,7 +10,7 @@ from app.features.store.service import get_float_qc_value
 from app.features.plm.models import Plm
 from app.features.relaxation import models, schemas, service
 from app.features.inspection_report.service import upsert_inspection_report
-from app.features.attachments.service import get_attachments
+from app.features.attachments.service import get_attachments, attach_stage_photos
 
 router = APIRouter(prefix="/relaxation", tags=["Fabric Relaxation"])
 
@@ -29,6 +29,13 @@ def _attach_roll_and_report_stats(report: models.FabricRelaxationReport):
     return report
 
 
+def _hydrate(db: Session, report: models.FabricRelaxationReport):
+    for roll in report.rolls:
+        _attach_photos(db, roll)
+    attach_stage_photos(db, report, report_type="relaxation_report")
+    return _attach_roll_and_report_stats(report)
+
+
 @router.post("", response_model=schemas.ReportOut)
 def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), _=Depends(require_roles("inspection"))):
     plm = db.query(Plm).get(payload.plm_id)
@@ -36,7 +43,7 @@ def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), 
         raise HTTPException(status_code=404, detail="PLM not found")
     existing = db.query(models.FabricRelaxationReport).options(joinedload(models.FabricRelaxationReport.rolls)).filter(models.FabricRelaxationReport.plm_id == plm.id).first()
     if existing:
-        return _attach_roll_and_report_stats(existing)
+        return _hydrate(db, existing)
     relaxation_hours = get_float_qc_value(plm, "relaxation", "relaxation_hours", 12)
     report = models.FabricRelaxationReport(
         **payload.model_dump(),
@@ -45,8 +52,7 @@ def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), 
     db.add(report)
     db.commit()
     db.refresh(report)
-    _attach_roll_and_report_stats(report)
-    return report
+    return _hydrate(db, report)
 
 
 @router.get("", response_model=List[schemas.ReportOut])
@@ -56,9 +62,7 @@ def list_reports(plm_id: Optional[UUID] = None, db: Session = Depends(get_db)):
         q = q.filter(models.FabricRelaxationReport.plm_id == plm_id)
     reports = q.order_by(models.FabricRelaxationReport.created_at.desc()).all()
     for report in reports:
-        for roll in report.rolls:
-            _attach_photos(db, roll)
-        _attach_roll_and_report_stats(report)
+        _hydrate(db, report)
     return reports
 
 
@@ -67,10 +71,7 @@ def get_report(report_id: UUID, db: Session = Depends(get_db)):
     report = db.query(models.FabricRelaxationReport).options(joinedload(models.FabricRelaxationReport.rolls)).get(report_id)
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
-    for roll in report.rolls:
-        _attach_photos(db, roll)
-    _attach_roll_and_report_stats(report)
-    return report
+    return _hydrate(db, report)
 
 
 @router.post("/{report_id}/rolls", response_model=schemas.RollOut)

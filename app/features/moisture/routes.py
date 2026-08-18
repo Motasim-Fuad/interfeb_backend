@@ -9,6 +9,8 @@ from app.features.moisture import models, schemas, service
 from app.features.inspection_report.service import upsert_inspection_report
 from app.features.plm.models import Plm
 from app.features.store.service import require_qc_float
+from app.features.attachments.service import attach_stage_photos
+from app.core.roll_payload import merge_roll_fields, require_before_wash_first
 
 router = APIRouter(prefix="/moisture", tags=["Moisture Check"])
 
@@ -22,6 +24,11 @@ def _attach_stats(report):
     return report
 
 
+def _hydrate(db, report):
+    attach_stage_photos(db, report, before_type="moisture_before_wash", after_type="moisture_after_wash")
+    return _attach_stats(report)
+
+
 @router.post("", response_model=schemas.ReportOut)
 def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), _=Depends(require_roles("inspection"))):
     plm = db.query(Plm).get(payload.plm_id)
@@ -29,7 +36,7 @@ def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), 
         raise HTTPException(status_code=404, detail="PLM not found")
     existing = db.query(models.MoistureCheckReport).options(joinedload(models.MoistureCheckReport.rolls)).filter(models.MoistureCheckReport.plm_id == plm.id).first()
     if existing:
-        return _attach_stats(existing)
+        return _hydrate(db, existing)
 
     acceptance, _ = require_qc_float(db, plm, "moisture", "acceptance_percentage")
     legacy_id = payload.fabric_composition_standard_id
@@ -48,21 +55,21 @@ def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), 
         acceptance_snapshot=acceptance,
     )
     db.add(report); db.commit(); db.refresh(report)
-    return _attach_stats(report)
+    return _hydrate(db, report)
 
 
 @router.get("", response_model=List[schemas.ReportOut])
 def list_reports(plm_id: Optional[UUID] = None, db: Session = Depends(get_db)):
     q = db.query(models.MoistureCheckReport).options(joinedload(models.MoistureCheckReport.rolls))
     if plm_id: q = q.filter(models.MoistureCheckReport.plm_id == plm_id)
-    return [_attach_stats(r) for r in q.order_by(models.MoistureCheckReport.created_at.desc()).all()]
+    return [_hydrate(db, r) for r in q.order_by(models.MoistureCheckReport.created_at.desc()).all()]
 
 
 @router.get("/{report_id}", response_model=schemas.ReportOut)
 def get_report(report_id: UUID, db: Session = Depends(get_db)):
     report = db.query(models.MoistureCheckReport).options(joinedload(models.MoistureCheckReport.rolls)).get(report_id)
     if not report: raise HTTPException(status_code=404, detail="Report not found")
-    return _attach_stats(report)
+    return _hydrate(db, report)
 
 
 @router.post("/{report_id}/rolls", response_model=schemas.RollOut)
@@ -74,10 +81,11 @@ def upsert_roll(report_id: UUID, payload: schemas.RollIn, db: Session = Depends(
     # Composition is planning data from the PLM/consignment, never re-entered by worker.
     plm = db.query(Plm).get(report.plm_id)
     data['fabric_composition'] = plm.fabric_composition if plm else data.get('fabric_composition')
+    require_before_wash_first(roll, data, ("swatch_rating_before",), ("swatch_rating_after",))
     if roll:
-        for k, v in data.items(): setattr(roll, k, v)
+        merge_roll_fields(roll, data)
     else:
-        roll = models.MoistureCheckRoll(report_id=report_id, **data); db.add(roll)
+        roll = models.MoistureCheckRoll(report_id=report_id, **{k: v for k, v in data.items() if v is not None or k == "roll_no"}); db.add(roll)
     db.commit(); db.refresh(roll)
     upsert_inspection_report(db, plm_id=report.plm_id, roll_number=roll.roll_no, color_name=roll.color, module_field="moisture_report_id", module_row_id=roll.id)
     db.commit(); return roll

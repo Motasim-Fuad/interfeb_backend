@@ -42,6 +42,7 @@ class ReportOut(BaseModel):
     relaxation_hours_snapshot: Optional[int] = None
     comments: Optional[str] = None
     rolls: List[RollOut] = []
+    attachments: List[AttachmentOut] = []
     avg_shrinkage_length: Optional[float] = None
     avg_shrinkage_width: Optional[float] = None
     class Config: from_attributes = True

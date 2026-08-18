@@ -52,5 +52,7 @@ class ReportOut(BaseModel):
     avg_over_less_after_pct: Optional[float] = None
     pass_before: Optional[bool] = None
     pass_after: Optional[bool] = None
+    before_wash_attachments: List[AttachmentOut] = []
+    after_wash_attachments: List[AttachmentOut] = []
 
     class Config: from_attributes = True

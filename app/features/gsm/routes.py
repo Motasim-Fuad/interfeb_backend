@@ -8,14 +8,21 @@ from app.core.deps import require_roles
 from app.features.plm.models import Plm
 from app.features.gsm import models, schemas, service
 from app.features.inspection_report.service import upsert_inspection_report
-from app.features.attachments.service import get_attachments
+from app.features.attachments.service import get_attachments, attach_stage_photos
 from app.features.store.service import require_qc_float
+from app.core.roll_payload import merge_roll_fields, require_before_wash_first
 
 router = APIRouter(prefix="/gsm", tags=["GSM Check"])
 
 
 def _attach_photos(db, roll):
     roll.attachments = get_attachments(db, "gsm_roll", roll.id); return roll
+
+def _hydrate(db, report):
+    for roll in report.rolls:
+        _attach_photos(db, roll)
+    attach_stage_photos(db, report, before_type="gsm_before_wash", after_type="gsm_after_wash")
+    return _attach_stats(report)
 
 def _attach_stats(report):
     stats = service.compute_report_stats(report.rolls, float(report.standard_gsm) if report.standard_gsm else 0, float(report.tolerance_snapshot) if report.tolerance_snapshot is not None else None)
@@ -27,11 +34,12 @@ def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), 
     plm=db.query(Plm).get(payload.plm_id)
     if not plm: raise HTTPException(status_code=404, detail="PLM not found")
     existing=db.query(models.GsmCheckReport).options(joinedload(models.GsmCheckReport.rolls)).filter(models.GsmCheckReport.plm_id==plm.id).first()
-    if existing: return _attach_stats(existing)
+    if existing: return _hydrate(db, existing)
     standard_gsm,_=require_qc_float(db,plm,"gsm","standard_gsm")
     tolerance,tolerance_id=require_qc_float(db,plm,"gsm","tolerance_percent",legacy_standard_module="gsm")
-    report=models.GsmCheckReport(plm_id=plm.id,report_date=payload.report_date,color=payload.color,standard_gsm=standard_gsm,tolerance_standard_id=tolerance_id,tolerance_snapshot=tolerance)
-    db.add(report); db.commit(); db.refresh(report); return _attach_stats(report)
+    color = payload.color or ', '.join(c.colour_code for c in (plm.colors or []) if c.colour_code) or None
+    report=models.GsmCheckReport(plm_id=plm.id,report_date=payload.report_date,color=color,standard_gsm=standard_gsm,tolerance_standard_id=tolerance_id,tolerance_snapshot=tolerance)
+    db.add(report); db.commit(); db.refresh(report); return _hydrate(db, report)
 
 @router.get("", response_model=List[schemas.ReportOut])
 def list_reports(plm_id: Optional[UUID]=None, db: Session=Depends(get_db)):
@@ -39,26 +47,26 @@ def list_reports(plm_id: Optional[UUID]=None, db: Session=Depends(get_db)):
     if plm_id:q=q.filter(models.GsmCheckReport.plm_id==plm_id)
     reports=q.order_by(models.GsmCheckReport.created_at.desc()).all()
     for r in reports:
-        for roll in r.rolls:_attach_photos(db,roll)
-        _attach_stats(r)
+        _hydrate(db, r)
     return reports
 
 @router.get("/{report_id}", response_model=schemas.ReportOut)
 def get_report(report_id:UUID,db:Session=Depends(get_db)):
     r=db.query(models.GsmCheckReport).options(joinedload(models.GsmCheckReport.rolls)).get(report_id)
     if not r:raise HTTPException(status_code=404,detail="Report not found")
-    for roll in r.rolls:_attach_photos(db,roll)
-    return _attach_stats(r)
+    return _hydrate(db, r)
 
 @router.post("/{report_id}/rolls", response_model=schemas.RollOut)
 def upsert_roll(report_id:UUID,payload:schemas.RollIn,db:Session=Depends(get_db),_=Depends(require_roles("inspection","worker"))):
     report=db.query(models.GsmCheckReport).get(report_id)
     if not report:raise HTTPException(status_code=404,detail="Report not found")
+    data=payload.model_dump()
     roll=db.query(models.GsmCheckRoll).filter(models.GsmCheckRoll.report_id==report_id,models.GsmCheckRoll.roll_no==payload.roll_no).first()
+    require_before_wash_first(roll, data, ("actual_gsm_before",), ("actual_gsm_after",))
     if roll:
-        for k,v in payload.model_dump().items():setattr(roll,k,v)
+        merge_roll_fields(roll, data)
     else:
-        roll=models.GsmCheckRoll(report_id=report_id,**payload.model_dump());db.add(roll)
+        roll=models.GsmCheckRoll(report_id=report_id,**{k:v for k,v in data.items() if v is not None or k=="roll_no"});db.add(roll)
     db.commit();db.refresh(roll)
     upsert_inspection_report(db,plm_id=report.plm_id,roll_number=roll.roll_no,color_name=roll.color,module_field="gsm_report_id",module_row_id=roll.id);db.commit()
     return _attach_photos(db,roll)

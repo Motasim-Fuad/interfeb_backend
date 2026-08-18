@@ -3,6 +3,8 @@ from typing import List, Optional
 from uuid import UUID
 from pydantic import BaseModel
 
+from app.features.attachments.schemas import AttachmentOut
+
 
 class RollIn(BaseModel):
     roll_no: str
@@ -42,4 +44,6 @@ class ReportOut(BaseModel):
     avg_swatch: Optional[float] = None
     pass_count: int = 0
     fail_count: int = 0
+    before_wash_attachments: List[AttachmentOut] = []
+    after_wash_attachments: List[AttachmentOut] = []
     class Config: from_attributes = True

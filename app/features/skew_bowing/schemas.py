@@ -57,7 +57,9 @@ class ReportOut(BaseModel):
     quantity_unit_snapshot: str
     qc_setup_version_snapshot: int = 1
     rolls: List[RollOut] = []
-    attachments: List[AttachmentOut] = []  # report-level swatch photo(s)
+    attachments: List[AttachmentOut] = []  # report-level fabric photo
+    before_wash_attachments: List[AttachmentOut] = []
+    after_wash_attachments: List[AttachmentOut] = []
 
     avg_percent_before: Optional[float] = None
     avg_percent_after: Optional[float] = None

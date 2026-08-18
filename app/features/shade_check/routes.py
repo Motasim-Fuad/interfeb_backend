@@ -8,7 +8,7 @@ from app.core.database import get_db
 from app.core.deps import require_roles
 from app.features.shade_check import models, schemas
 from app.features.inspection_report.service import upsert_inspection_report
-from app.features.attachments.service import get_attachments
+from app.features.attachments.service import get_attachments, attach_stage_photos
 from app.features.admin_config.models import ShadeCheckPointDefinition
 from app.features.plm.models import Plm
 
@@ -18,6 +18,13 @@ router = APIRouter(prefix="/shade-check", tags=["Shade Check"])
 def _photos(db, row):
     row.attachments = get_attachments(db, "shade_check_roll", row.id)
     return row
+
+
+def _hydrate(db, report):
+    for roll in report.rolls:
+        _photos(db, roll)
+    attach_stage_photos(db, report, report_type="shade_check_report")
+    return report
 
 
 def _points_list_for_plm(db: Session, plm: Plm) -> list[dict]:
@@ -45,7 +52,7 @@ def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), 
         joinedload(models.ShadeCheckReport.rolls).joinedload(models.ShadeCheckRoll.results)
     ).filter(models.ShadeCheckReport.plm_id == payload.plm_id).first()
     if existing:
-        return existing
+        return _hydrate(db, existing)
     plm = db.query(Plm).get(payload.plm_id)
     if not plm:
         raise HTTPException(status_code=404, detail="PLM not found")
@@ -60,7 +67,7 @@ def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), 
     db.add(row)
     db.commit()
     db.refresh(row)
-    return row
+    return _hydrate(db, row)
 
 
 @router.get("", response_model=List[schemas.ReportOut])
@@ -74,8 +81,7 @@ def list_reports(plm_id: Optional[UUID] = None, db: Session = Depends(get_db)):
         q = q.filter(models.ShadeCheckReport.plm_id == plm_id)
     reports = q.order_by(models.ShadeCheckReport.created_at.desc()).all()
     for report in reports:
-        for roll in report.rolls:
-            _photos(db, roll)
+        _hydrate(db, report)
     return reports
 
 
@@ -88,9 +94,7 @@ def get_report(report_id: UUID, db: Session = Depends(get_db)):
     ).get(report_id)
     if not row:
         raise HTTPException(status_code=404, detail="Report not found")
-    for roll in row.rolls:
-        _photos(db, roll)
-    return row
+    return _hydrate(db, row)
 
 
 @router.patch("/{report_id}", response_model=schemas.ReportOut)

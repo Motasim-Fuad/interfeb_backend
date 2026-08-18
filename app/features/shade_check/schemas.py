@@ -57,4 +57,5 @@ class ReportOut(BaseModel):
     points_snapshot: List[Dict[str, Any]] = []
     qc_setup_version_snapshot: int = 1
     rolls: List[RollOut] = []
+    attachments: List[AttachmentOut] = []
     class Config: from_attributes = True
