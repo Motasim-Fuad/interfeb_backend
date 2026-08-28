@@ -8,8 +8,9 @@ from app.core.deps import require_roles
 from app.features.moisture import models, schemas, service
 from app.features.inspection_report.service import upsert_inspection_report
 from app.features.plm.models import Plm
-from app.features.store.service import require_qc_float
+from app.features.store.service import resolve_qc_float
 from app.features.attachments.service import attach_stage_photos
+from app.features.admin_config.service import parse_optional_float
 from app.core.roll_payload import merge_roll_fields, require_before_wash_first
 
 router = APIRouter(prefix="/moisture", tags=["Moisture Check"])
@@ -25,6 +26,11 @@ def _attach_stats(report):
 
 
 def _hydrate(db, report):
+    plm = db.query(Plm).options(joinedload(Plm.material)).get(report.plm_id)
+    if plm and plm.material:
+        accepted = parse_optional_float(plm.material.accepted_moisture)
+        if accepted is not None:
+            report.acceptance_snapshot = accepted
     attach_stage_photos(db, report, before_type="moisture_before_wash", after_type="moisture_after_wash")
     return _attach_stats(report)
 
@@ -38,7 +44,7 @@ def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), 
     if existing:
         return _hydrate(db, existing)
 
-    acceptance, _ = require_qc_float(db, plm, "moisture", "acceptance_percentage")
+    acceptance, _ = resolve_qc_float(db, plm, "moisture", "acceptance_percentage")
     legacy_id = payload.fabric_composition_standard_id
     if acceptance is None and legacy_id:
         from app.features.admin_config.models import FabricCompositionStandard

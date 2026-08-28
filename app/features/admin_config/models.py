@@ -42,6 +42,69 @@ class SupplierQcProfile(Base, UUIDMixin, TimestampMixin):
     supplier = relationship("Supplier")
 
 
+class Material(Base, UUIDMixin, TimestampMixin):
+    """Reusable fabric identity (Name / Composition / Construction / Appearance).
+
+    Dashboard master data, same pattern as Defect Types. GSM expected, GSM
+    tolerance, accepted moisture, and skew acceptance stay live — editing a
+    Material updates every PLM that uses it. Consignment 4-point QC is still
+    snapshotted separately.
+    """
+    __tablename__ = "materials"
+
+    # Name
+    fabric_name = Column(String, nullable=False)
+    dyeing_method = Column(String, nullable=True)
+    primary_fiber = Column(String, nullable=True)
+    fabric_code = Column(String, nullable=True)
+    # Composition
+    fiber_type_1 = Column(String, nullable=True)
+    fiber_1_pct = Column(String, nullable=True)
+    fiber_type_2 = Column(String, nullable=True)
+    fiber_2_pct = Column(String, nullable=True)
+    fiber_type_3 = Column(String, nullable=True)
+    fiber_3_pct = Column(String, nullable=True)
+    accepted_moisture = Column(String, nullable=True)
+    # Construction
+    weave_knit_type = Column(String, nullable=True)
+    warp_count = Column(String, nullable=True)
+    weft_count = Column(String, nullable=True)
+    epi = Column(String, nullable=True)
+    ppi = Column(String, nullable=True)
+    gsm_expected = Column(String, nullable=True)
+    gsm_tolerance = Column(String, nullable=True)
+    fabric_width_expected = Column(String, nullable=True)
+    width_tolerance = Column(String, nullable=True)
+    fabric_length_per_roll = Column(String, nullable=True)
+    # Appearance
+    shade_color_name = Column(String, nullable=True)
+    shade_code = Column(String, nullable=True)
+    finish = Column(String, nullable=True)
+    handfeel = Column(String, nullable=True)
+    surface_defect_tolerance = Column(String, nullable=True)
+    pattern_design = Column(String, nullable=True)
+
+    is_active = Column(Boolean, default=True, nullable=False)
+
+    @property
+    def display_name(self) -> str:
+        parts = [self.fabric_name, self.dyeing_method, self.primary_fiber]
+        return " - ".join(p.strip() for p in parts if p and str(p).strip()) or (self.fabric_name or "Material")
+
+    @property
+    def composition_label(self) -> str:
+        chunks = []
+        for i in (1, 2, 3):
+            fiber = getattr(self, f"fiber_type_{i}")
+            pct = getattr(self, f"fiber_{i}_pct")
+            if fiber and str(fiber).strip():
+                if pct and str(pct).strip():
+                    chunks.append(f"{str(pct).strip()}% {str(fiber).strip()}")
+                else:
+                    chunks.append(str(fiber).strip())
+        return " / ".join(chunks) or (self.primary_fiber or "")
+
+
 class DefectType(Base, UUIDMixin, TimestampMixin):
     """Shade, Hole, Naps... - admin adds/removes from dashboard, used by Fabric Inspection + Correlation."""
     __tablename__ = "defect_types"

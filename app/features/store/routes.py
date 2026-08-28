@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import require_admin
+from app.core.list_query import apply_page, apply_text_search, apply_year_month
 from app.features.store import models, schemas
 from app.features.admin_config.models import Supplier
 from app.features.admin_config.service import get_supplier_qc_config, deep_merge
@@ -14,11 +15,7 @@ router = APIRouter(prefix="/store/fabric-receives", tags=["Store - Fabric Receiv
 
 
 _FINAL_QC_REQUIRED = {
-    "gsm": ("standard_gsm", "tolerance_percent"),
-    "moisture": ("acceptance_percentage",),
-    "skew_bowing": ("standard_point",),
-    "relaxation": ("relaxation_hours",),
-    "fabric_inspection": ("individual_standard", "average_standard", "checked_quantity"),
+    "fabric_inspection": ("individual_standard", "average_standard"),
     "correlation": ("standard", "scs"),
 }
 
@@ -60,8 +57,6 @@ def _validate_finalized_setup(data: dict, current: models.FabricReceive | None =
         ("buyer_id", "buyer"),
         ("supplier_id", "supplier"),
         ("received_quantity", "received quantity"),
-        ("fabric_type", "fabric type"),
-        ("fabric_composition", "fabric composition"),
         ("measurement_unit", "measurement unit"),
     ):
         value = effective(key)
@@ -87,27 +82,8 @@ def _validate_finalized_setup(data: dict, current: models.FabricReceive | None =
             except (TypeError, ValueError):
                 invalid_qc.append(f"{module}.{field}")
                 continue
-            if field == "checked_quantity" and number <= 0:
+            if number < 0:
                 invalid_qc.append(f"{module}.{field}")
-            elif field != "checked_quantity" and number < 0:
-                invalid_qc.append(f"{module}.{field}")
-
-    moisture_section = (qc.get("moisture") or {}) if isinstance(qc, dict) else {}
-    if not isinstance(moisture_section, dict) or not str(moisture_section.get("standard_label") or "").strip():
-        missing_qc.append("moisture.standard_label")
-
-    skew_section = (qc.get("skew_bowing") or {}) if isinstance(qc, dict) else {}
-    if not isinstance(skew_section, dict) or not str(skew_section.get("width_label") or "").strip():
-        missing_qc.append("skew_bowing.width_label")
-
-    shade_section = (qc.get("shade_check") or {}) if isinstance(qc, dict) else {}
-    shade_points = shade_section.get("points") if isinstance(shade_section, dict) else None
-    if not isinstance(shade_points, list) or not shade_points:
-        missing_qc.append("shade_check.points")
-
-    checked = ((qc.get("fabric_inspection") or {}).get("checked_quantity") if isinstance(qc, dict) else None)
-    if checked is not None and qty is not None and float(checked) > float(qty):
-        raise HTTPException(status_code=422, detail="4-point checked quantity cannot exceed the consignment received quantity")
 
     if missing_context or missing_qc or invalid_qc:
         parts = []
@@ -235,16 +211,25 @@ def list_fabric_receives(
     consignment: Optional[str] = None,
     buyer_id: Optional[UUID] = None,
     supplier_id: Optional[UUID] = None,
+    q: Optional[str] = None,
+    year: Optional[int] = None,
+    month: Optional[int] = None,
+    limit: Optional[int] = None,
+    offset: int = 0,
     db: Session = Depends(get_db),
 ):
-    q = db.query(models.FabricReceive)
+    query = db.query(models.FabricReceive)
     if consignment:
-        q = q.filter(models.FabricReceive.consignment.ilike(f"%{consignment}%"))
+        query = query.filter(models.FabricReceive.consignment.ilike(f"%{consignment}%"))
     if buyer_id:
-        q = q.filter(models.FabricReceive.buyer_id == buyer_id)
+        query = query.filter(models.FabricReceive.buyer_id == buyer_id)
     if supplier_id:
-        q = q.filter(models.FabricReceive.supplier_id == supplier_id)
-    return q.order_by(models.FabricReceive.created_at.desc()).all()
+        query = query.filter(models.FabricReceive.supplier_id == supplier_id)
+    query = apply_text_search(query, models.FabricReceive, q, ("consignment", "fabric_type", "fabric_composition", "notes"))
+    query = apply_year_month(query, models.FabricReceive.received_at, year, month)
+    query = query.order_by(models.FabricReceive.created_at.desc())
+    query = apply_page(query, limit=limit, offset=offset)
+    return query.all()
 
 
 @router.get("/{receive_id}", response_model=schemas.FabricReceiveOut)

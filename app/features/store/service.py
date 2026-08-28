@@ -15,10 +15,17 @@ def get_receive_for_plm(db: Session, plm: Plm | str) -> Optional[FabricReceive]:
 
 
 def get_qc_value(context: Any, module: str, key: str, default: Any = None) -> Any:
-    """Read a QC value from a PLM snapshot or legacy FabricReceive context."""
-    if not context or not getattr(context, "qc_config", None):
+    """Read a QC value from a PLM. Material GSM/moisture/skew stay live from Materials."""
+    if not context:
         return default
-    module_config = context.qc_config.get(module) or {}
+    if getattr(context, "material", None) is not None:
+        from app.features.admin_config.service import qc_config_with_live_material
+        qc = qc_config_with_live_material(context)
+    else:
+        qc = getattr(context, "qc_config", None) or {}
+    if not qc:
+        return default
+    module_config = qc.get(module) or {}
     value = module_config.get(key, default)
     return value
 
@@ -36,13 +43,11 @@ def get_float_qc_value(context: Any, module: str, key: str, default=None):
 def resolve_qc_float(db: Session, plm: Plm, module: str, key: str, *, legacy_standard_module: str | None = None, default=None):
     """
     Final standard resolution for inspections:
-      1) immutable PLM snapshot of the finalized consignment QC setup
+      1) live Material numbers for GSM / moisture / skew, else PLM qc_config
       2) linked FabricReceive only as backwards compatibility for old PLM rows
       3) legacy admin-config standard as an old-data fallback
       4) explicit default
     """
-    # New PLMs carry an immutable snapshot of the finalized consignment QC setup.
-    # This is the authoritative source for every inspection belonging to that PLM.
     value = get_float_qc_value(plm, module, key, None)
     if value is not None:
         return value, None

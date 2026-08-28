@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Optional
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class SupplierRankItem(BaseModel):
@@ -68,3 +68,20 @@ class InspectionRollPage(BaseModel):
     completed_rolls: int
     in_progress_rolls: int
     rows: list[InspectionRollSummary]
+
+
+class SupplierMonthlyInputIn(BaseModel):
+    supplier_id: UUID
+    year: int
+    month: int = Field(ge=1, le=12)
+    communication_rating: Optional[float] = Field(default=None, ge=1, le=5)
+    notes: Optional[str] = None
+
+
+class SupplierMonthlyInputOut(SupplierMonthlyInputIn):
+    id: UUID
+    supplier_name: str = ""
+    created_at: datetime
+    class Config:
+        from_attributes = True
+

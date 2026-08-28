@@ -16,6 +16,7 @@ class Plm(Base, BaseEntity):
     buyer_id = Column(UUID(as_uuid=True), ForeignKey("buyers.id"), nullable=True)
     supplier_id = Column(UUID(as_uuid=True), ForeignKey("suppliers.id"), nullable=True)
     fabric_receive_id = Column(UUID(as_uuid=True), ForeignKey("fabric_receives.id"), nullable=True)
+    material_id = Column(UUID(as_uuid=True), ForeignKey("materials.id"), nullable=True)
     plm_style = Column(String, nullable=True)
     fabric_type = Column(String, nullable=True)
     fabric_composition = Column(String, nullable=True)
@@ -31,10 +32,12 @@ class Plm(Base, BaseEntity):
     received_at = Column(Date, nullable=True)
     qc_config = Column(JSON, nullable=False, default=dict)
     qc_setup_version = Column(Integer, nullable=False, default=1)
+    material_snapshot = Column(JSON, nullable=False, default=dict)
 
     buyer = relationship("Buyer")
     supplier = relationship("Supplier")
     fabric_receive = relationship("FabricReceive", back_populates="plms")
+    material = relationship("Material")
     colors = relationship("PlmColor", back_populates="plm", cascade="all, delete-orphan")
 
     @property
@@ -44,6 +47,12 @@ class Plm(Base, BaseEntity):
     @property
     def supplier_name(self):
         return self.supplier.name if self.supplier else None
+
+    @property
+    def material_display_name(self):
+        if isinstance(self.material_snapshot, dict) and self.material_snapshot.get("display_name"):
+            return self.material_snapshot.get("display_name")
+        return self.material.display_name if self.material else None
 
 
 class PlmColor(Base, BaseEntity):

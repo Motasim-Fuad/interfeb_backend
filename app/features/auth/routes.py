@@ -83,12 +83,27 @@ def create_access_code(
 
 @router.get("/access-codes", response_model=List[schemas.AccessCodeOut])
 def list_access_codes(db: Session = Depends(get_db), admin: CurrentUser = Depends(require_admin())):
-    return db.query(models.AccessCode).order_by(models.AccessCode.created_at.desc()).all()
+    return (
+        db.query(models.AccessCode)
+        .filter(models.AccessCode.is_active == True)  # noqa: E712
+        .order_by(models.AccessCode.created_at.desc())
+        .all()
+    )
+
+
+@router.delete("/access-codes/{code_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_access_code(code_id: UUID, db: Session = Depends(get_db), admin: CurrentUser = Depends(require_admin())):
+    row = db.query(models.AccessCode).filter(models.AccessCode.id == code_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Access code not found")
+    db.delete(row)
+    db.commit()
 
 
 @router.patch("/access-codes/{code_id}/deactivate", response_model=schemas.AccessCodeOut)
-def deactivate_access_code(code_id: str, db: Session = Depends(get_db), admin: CurrentUser = Depends(require_admin())):
-    row = db.query(models.AccessCode).get(code_id)
+def deactivate_access_code(code_id: UUID, db: Session = Depends(get_db), admin: CurrentUser = Depends(require_admin())):
+    """Legacy: prefer DELETE. Kept so older dashboard builds still work."""
+    row = db.query(models.AccessCode).filter(models.AccessCode.id == code_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Access code not found")
     row.is_active = False

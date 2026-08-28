@@ -61,6 +61,7 @@ class PlmCreate(BaseModel):
     plm_code: str
     plm_date: date
     fabric_receive_id: UUID
+    material_id: UUID
     plm_style: Optional[str] = None
     allocated_quantity: Optional[float] = None
     colors: List[PlmColorIn] = Field(default_factory=list)
@@ -81,6 +82,9 @@ class PlmOut(BaseModel):
     buyer_name: Optional[str] = None
     supplier_name: Optional[str] = None
     fabric_receive_id: Optional[UUID] = None
+    material_id: Optional[UUID] = None
+    material_display_name: Optional[str] = None
+    material_snapshot: Dict[str, Any] = Field(default_factory=dict)
     plm_style: Optional[str] = None
     fabric_type: Optional[str] = None
     fabric_composition: Optional[str] = None

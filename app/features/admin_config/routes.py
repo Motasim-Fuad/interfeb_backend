@@ -11,8 +11,13 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import require_admin
+from app.core.list_query import apply_page, apply_text_search
 from app.features.admin_config import models, schemas
-from app.features.admin_config.service import supplier_defaults_payload, supplier_shade_points
+from app.features.admin_config.service import (
+    ensure_default_shade_points,
+    supplier_defaults_payload,
+    supplier_shade_points,
+)
 
 router = APIRouter(prefix="/admin-config", tags=["Admin Config (dashboard-editable)"])
 
@@ -28,8 +33,10 @@ def _normalize_supplier_profile_config(raw: dict) -> dict:
 
     moisture = dict(config.get("moisture") or {})
     standards = moisture.get("composition_standards") or []
-    if not isinstance(standards, list):
+    if standards and not isinstance(standards, list):
         raise HTTPException(status_code=422, detail="moisture.composition_standards must be a list")
+    if not isinstance(standards, list):
+        standards = []
     clean_moisture = []
     seen = set()
     for row in standards:
@@ -56,8 +63,10 @@ def _normalize_supplier_profile_config(raw: dict) -> dict:
 
     skew = dict(config.get("skew_bowing") or {})
     width_standards = skew.get("width_standards") or []
-    if not isinstance(width_standards, list):
+    if width_standards and not isinstance(width_standards, list):
         raise HTTPException(status_code=422, detail="skew_bowing.width_standards must be a list")
+    if not isinstance(width_standards, list):
+        width_standards = []
     clean_width = []
     seen = set()
     for row in width_standards:
@@ -113,13 +122,23 @@ def register_crud(prefix: str, model: Type, schema_in, schema_out):
         return row
 
     @sub.get("", response_model=List[schema_out])
-    def list_all(active_only: bool = False, supplier_id: Optional[UUID] = None, db: Session = Depends(get_db)):
-        q = db.query(model)
+    def list_all(
+        active_only: bool = False,
+        supplier_id: Optional[UUID] = None,
+        q: Optional[str] = None,
+        limit: Optional[int] = None,
+        offset: int = 0,
+        db: Session = Depends(get_db),
+    ):
+        query = db.query(model)
         if active_only:
-            q = q.filter(model.is_active == True)  # noqa: E712
+            query = query.filter(model.is_active == True)  # noqa: E712
         if supplier_id is not None and hasattr(model, "supplier_id"):
-            q = q.filter(model.supplier_id == supplier_id)
-        return q.order_by(getattr(model, "sort_order", model.created_at)).all()
+            query = query.filter(model.supplier_id == supplier_id)
+        query = apply_text_search(query, model, q, ("name", "fabric_name", "fabric_code", "label", "primary_fiber", "dyeing_method"))
+        query = query.order_by(getattr(model, "sort_order", model.created_at))
+        query = apply_page(query, limit=limit, offset=offset)
+        return query.all()
 
     @sub.put("/{item_id}", response_model=schema_out)
     def update(item_id: UUID, payload: schema_in, db: Session = Depends(get_db), _=Depends(require_admin())):
@@ -128,6 +147,9 @@ def register_crud(prefix: str, model: Type, schema_in, schema_out):
             raise HTTPException(status_code=404, detail="Not found")
         for k, v in payload.model_dump().items():
             setattr(row, k, v)
+        if model is models.Material:
+            from app.features.admin_config.service import push_material_standards
+            push_material_standards(db, row)
         db.commit()
         db.refresh(row)
         return row
@@ -157,6 +179,7 @@ def register_crud(prefix: str, model: Type, schema_in, schema_out):
 
 router.include_router(register_crud("buyers", models.Buyer, schemas.BuyerIn, schemas.BuyerOut))
 router.include_router(register_crud("suppliers", models.Supplier, schemas.SupplierIn, schemas.SupplierOut))
+router.include_router(register_crud("materials", models.Material, schemas.MaterialIn, schemas.MaterialOut))
 router.include_router(register_crud(
     "supplier-qc-profiles", models.SupplierQcProfile,
     schemas.SupplierQcProfileIn, schemas.SupplierQcProfileOut,
@@ -239,7 +262,8 @@ def save_supplier_qc_profile(
     db.flush()
     config = _normalize_supplier_profile_config(dict(payload.qc_config or {}))
     shade_section = dict(config.get("shade_check") or {})
-    shade_section["points"] = supplier_shade_points(db, supplier_id)
+    points = supplier_shade_points(db, supplier_id)
+    shade_section["points"] = points or ensure_default_shade_points(db)
     config["shade_check"] = shade_section
     profile.qc_config = config
 

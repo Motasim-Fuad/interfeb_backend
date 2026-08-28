@@ -19,3 +19,4 @@ from app.features.correlation import models as correlation_models           # no
 from app.features.color_continuity import models as color_continuity_models  # noqa
 from app.features.factory_report import models as factory_report_models     # noqa
 from app.features.inspection_report import models as inspection_report_models  # noqa
+from app.features.analytics import models as analytics_models  # noqa

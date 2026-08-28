@@ -10,12 +10,15 @@ from datetime import date
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
+from app.core.deps import require_admin
+from app.core.list_query import apply_page
 from app.features.admin_config.models import Buyer, DefectType, Supplier
+from app.features.analytics.models import SupplierMonthlyInput
 from app.features.fabric_inspection.models import FabricInspectionRoll, FabricInspectionRollDefect, FabricInspectionReport
 from app.features.plm.models import Plm
 from app.features.store.models import FabricReceive
@@ -167,6 +170,11 @@ def inspection_rolls(
     plm_code: Optional[str] = None,
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
+    year: Optional[int] = None,
+    month: Optional[int] = None,
+    search: Optional[str] = None,
+    limit: Optional[int] = None,
+    offset: int = 0,
     db: Session = Depends(get_db),
 ):
     """
@@ -174,6 +182,7 @@ def inspection_rolls(
     Context is joined from PLM -> Fabric Receive -> Buyer/Supplier, never duplicated.
     Filters support old-data review by buyer, supplier, consignment, PLM and month/date.
     """
+    from app.features.analytics.service import month_bounds
     q = (
         db.query(InspectionReport, Plm, FabricReceive, Buyer, Supplier)
         .join(Plm, Plm.id == InspectionReport.plm_id)
@@ -193,12 +202,25 @@ def inspection_rolls(
         q = q.filter(Plm.id == plm_id)
     if plm_code:
         q = q.filter(func.lower(Plm.plm_code).contains(plm_code.lower().strip()))
+    if search:
+        term = search.strip().lower()
+        q = q.filter(
+            func.lower(Plm.plm_code).contains(term)
+            | func.lower(func.coalesce(FabricReceive.consignment, "")).contains(term)
+            | func.lower(func.coalesce(Buyer.name, "")).contains(term)
+            | func.lower(func.coalesce(Supplier.name, "")).contains(term)
+        )
+    if year and not date_from:
+        date_from, date_to = month_bounds(year, month)
     if date_from:
         q = q.filter(func.date(InspectionReport.submitted_at) >= date_from)
     if date_to:
         q = q.filter(func.date(InspectionReport.submitted_at) <= date_to)
 
-    records = q.order_by(InspectionReport.submitted_at.desc(), Plm.plm_code, InspectionReport.roll_number).all()
+    q = q.order_by(InspectionReport.submitted_at.desc(), Plm.plm_code, InspectionReport.roll_number)
+    total_matching = q.count()
+    q = apply_page(q, limit=limit, offset=offset)
+    records = q.all()
     plm_ids = {plm.id for _, plm, _, _, _ in records}
     factory_plm_ids = set()
     if plm_ids:
@@ -238,8 +260,65 @@ def inspection_rolls(
         })
     completed = sum(1 for row in rows if row["completed_modules"] == row["total_modules"])
     return {
-        "total": len(rows),
+        "total": total_matching,
         "completed_rolls": completed,
         "in_progress_rolls": len(rows) - completed,
         "rows": rows,
     }
+
+
+@router.get("/supplier-monthly-inputs", response_model=List[schemas.SupplierMonthlyInputOut])
+def list_monthly_inputs(year: int, month: int, db: Session = Depends(get_db)):
+    rows = (
+        db.query(SupplierMonthlyInput)
+        .options(joinedload(SupplierMonthlyInput.supplier))
+        .filter(SupplierMonthlyInput.year == year, SupplierMonthlyInput.month == month)
+        .all()
+    )
+    return [
+        schemas.SupplierMonthlyInputOut(
+            id=row.id,
+            supplier_id=row.supplier_id,
+            year=row.year,
+            month=row.month,
+            communication_rating=float(row.communication_rating) if row.communication_rating is not None else None,
+            notes=row.notes,
+            supplier_name=row.supplier.name if row.supplier else "",
+            created_at=row.created_at,
+        )
+        for row in rows
+    ]
+
+
+@router.put("/supplier-monthly-inputs", response_model=schemas.SupplierMonthlyInputOut)
+def upsert_monthly_input(payload: schemas.SupplierMonthlyInputIn, db: Session = Depends(get_db), _=Depends(require_admin())):
+    if payload.month < 1 or payload.month > 12:
+        raise HTTPException(status_code=422, detail="month must be 1-12")
+    row = (
+        db.query(SupplierMonthlyInput)
+        .filter(
+            SupplierMonthlyInput.supplier_id == payload.supplier_id,
+            SupplierMonthlyInput.year == payload.year,
+            SupplierMonthlyInput.month == payload.month,
+        )
+        .first()
+    )
+    if row is None:
+        row = SupplierMonthlyInput(**payload.model_dump())
+        db.add(row)
+    else:
+        row.communication_rating = payload.communication_rating
+        row.notes = payload.notes
+    db.commit()
+    db.refresh(row)
+    supplier = db.query(Supplier).get(row.supplier_id)
+    return schemas.SupplierMonthlyInputOut(
+        id=row.id,
+        supplier_id=row.supplier_id,
+        year=row.year,
+        month=row.month,
+        communication_rating=float(row.communication_rating) if row.communication_rating is not None else None,
+        notes=row.notes,
+        supplier_name=supplier.name if supplier else "",
+        created_at=row.created_at,
+    )

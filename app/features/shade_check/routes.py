@@ -10,6 +10,7 @@ from app.features.shade_check import models, schemas
 from app.features.inspection_report.service import upsert_inspection_report
 from app.features.attachments.service import get_attachments, attach_stage_photos
 from app.features.admin_config.models import ShadeCheckPointDefinition
+from app.features.admin_config.service import ensure_default_shade_points
 from app.features.plm.models import Plm
 
 router = APIRouter(prefix="/shade-check", tags=["Shade Check"])
@@ -58,7 +59,12 @@ def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), 
         raise HTTPException(status_code=404, detail="PLM not found")
     points = _points_list_for_plm(db, plm)
     if not points:
-        raise HTTPException(status_code=422, detail="This consignment has no finalized Shade Check points. Configure them in Dashboard first.")
+        points = ensure_default_shade_points(db)
+        qc = dict(plm.qc_config or {})
+        shade = dict(qc.get("shade_check") or {})
+        shade["points"] = points
+        qc["shade_check"] = shade
+        plm.qc_config = qc
     row = models.ShadeCheckReport(
         **payload.model_dump(),
         points_snapshot=points,

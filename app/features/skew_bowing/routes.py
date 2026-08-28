@@ -9,12 +9,21 @@ from app.features.skew_bowing import models, schemas, service
 from app.features.inspection_report.service import upsert_inspection_report
 from app.features.attachments.service import get_attachments, attach_stage_photos
 from app.features.plm.models import Plm
-from app.features.store.service import require_qc_float, get_qc_value
+from app.features.store.service import resolve_qc_float, get_qc_value
+from app.features.admin_config.service import parse_optional_float
 from app.core.roll_payload import merge_roll_fields, require_before_wash_first
 
 router=APIRouter(prefix="/skew-bowing",tags=["Skew & Bowing"])
 
 def _attach(db,report):
+    plm=db.query(Plm).options(joinedload(Plm.material)).get(report.plm_id)
+    if plm and plm.material:
+        std_live=parse_optional_float(plm.material.width_tolerance)
+        width_live=(plm.material.fabric_width_expected or "").strip()
+        if std_live is not None:
+            report.standard_point_snapshot=std_live
+        if width_live:
+            report.fabric_width_label_snapshot=width_live
     report.attachments=get_attachments(db,"skew_bowing_report",report.id)
     attach_stage_photos(db, report, before_type="skew_before_wash", after_type="skew_after_wash")
     std=float(report.standard_point_snapshot) if report.standard_point_snapshot is not None else None
@@ -30,7 +39,7 @@ def create_report(payload:schemas.ReportCreate,db:Session=Depends(get_db),_=Depe
     if not plm:raise HTTPException(status_code=404,detail="PLM not found")
     existing=db.query(models.SkewBowingReport).options(joinedload(models.SkewBowingReport.rolls)).filter(models.SkewBowingReport.plm_id==plm.id).first()
     if existing:return _attach(db,existing)
-    std,_=require_qc_float(db,plm,"skew_bowing","standard_point")
+    std,_=resolve_qc_float(db,plm,"skew_bowing","standard_point")
     is_stripe=bool(get_qc_value(plm,"skew_bowing","is_stripe",payload.is_stripe))
     legacy_width_id=None
     total_roll=sum(len(c.rolls) for c in plm.colors)

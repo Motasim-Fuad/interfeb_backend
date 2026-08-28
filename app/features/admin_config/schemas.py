@@ -32,6 +32,44 @@ class SupplierOut(SupplierIn):
     class Config: from_attributes = True
 
 
+class MaterialIn(BaseModel):
+    fabric_name: str
+    dyeing_method: Optional[str] = None
+    primary_fiber: Optional[str] = None
+    fabric_code: Optional[str] = None
+    fiber_type_1: Optional[str] = None
+    fiber_1_pct: Optional[str] = None
+    fiber_type_2: Optional[str] = None
+    fiber_2_pct: Optional[str] = None
+    fiber_type_3: Optional[str] = None
+    fiber_3_pct: Optional[str] = None
+    accepted_moisture: Optional[str] = None
+    weave_knit_type: Optional[str] = None
+    warp_count: Optional[str] = None
+    weft_count: Optional[str] = None
+    epi: Optional[str] = None
+    ppi: Optional[str] = None
+    gsm_expected: Optional[str] = None
+    gsm_tolerance: Optional[str] = None
+    fabric_width_expected: Optional[str] = None
+    width_tolerance: Optional[str] = None
+    fabric_length_per_roll: Optional[str] = None
+    shade_color_name: Optional[str] = None
+    shade_code: Optional[str] = None
+    finish: Optional[str] = None
+    handfeel: Optional[str] = None
+    surface_defect_tolerance: Optional[str] = None
+    pattern_design: Optional[str] = None
+    is_active: bool = True
+
+
+class MaterialOut(MaterialIn):
+    id: UUID
+    display_name: str
+    composition_label: str
+    class Config: from_attributes = True
+
+
 class DefectTypeIn(BaseModel):
     name: str
     sort_order: int = 0

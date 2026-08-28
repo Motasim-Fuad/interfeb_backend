@@ -10,6 +10,7 @@ from app.features.gsm import models, schemas, service
 from app.features.inspection_report.service import upsert_inspection_report
 from app.features.attachments.service import get_attachments, attach_stage_photos
 from app.features.store.service import require_qc_float
+from app.features.admin_config.service import parse_optional_float
 from app.core.roll_payload import merge_roll_fields, require_before_wash_first
 
 router = APIRouter(prefix="/gsm", tags=["GSM Check"])
@@ -19,6 +20,14 @@ def _attach_photos(db, roll):
     roll.attachments = get_attachments(db, "gsm_roll", roll.id); return roll
 
 def _hydrate(db, report):
+    plm = db.query(Plm).options(joinedload(Plm.material)).get(report.plm_id)
+    if plm and plm.material:
+        std = parse_optional_float(plm.material.gsm_expected)
+        tol = parse_optional_float(plm.material.gsm_tolerance)
+        if std is not None:
+            report.standard_gsm = std
+        if tol is not None:
+            report.tolerance_snapshot = tol
     for roll in report.rolls:
         _attach_photos(db, roll)
     attach_stage_photos(db, report, before_type="gsm_before_wash", after_type="gsm_after_wash")
