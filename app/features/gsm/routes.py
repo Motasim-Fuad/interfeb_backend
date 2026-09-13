@@ -1,3 +1,4 @@
+from datetime import date
 from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,7 +12,7 @@ from app.features.inspection_report.service import upsert_inspection_report
 from app.features.attachments.service import get_attachments, attach_stage_photos
 from app.features.store.service import require_qc_float
 from app.features.admin_config.service import parse_optional_float
-from app.core.roll_payload import merge_roll_fields, require_before_wash_first
+from app.core.roll_payload import merge_roll_fields, require_before_wash_first, stamp_wash_dates
 
 router = APIRouter(prefix="/gsm", tags=["GSM Check"])
 
@@ -47,7 +48,7 @@ def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), 
     standard_gsm,_=require_qc_float(db,plm,"gsm","standard_gsm")
     tolerance,tolerance_id=require_qc_float(db,plm,"gsm","tolerance_percent",legacy_standard_module="gsm")
     color = payload.color or ', '.join(c.colour_code for c in (plm.colors or []) if c.colour_code) or None
-    report=models.GsmCheckReport(plm_id=plm.id,report_date=payload.report_date,color=color,standard_gsm=standard_gsm,tolerance_standard_id=tolerance_id,tolerance_snapshot=tolerance)
+    report=models.GsmCheckReport(plm_id=plm.id,report_date=payload.report_date or date.today(),color=color,standard_gsm=standard_gsm,tolerance_standard_id=tolerance_id,tolerance_snapshot=tolerance)
     db.add(report); db.commit(); db.refresh(report); return _hydrate(db, report)
 
 @router.get("", response_model=List[schemas.ReportOut])
@@ -72,6 +73,7 @@ def upsert_roll(report_id:UUID,payload:schemas.RollIn,db:Session=Depends(get_db)
     data=payload.model_dump()
     roll=db.query(models.GsmCheckRoll).filter(models.GsmCheckRoll.report_id==report_id,models.GsmCheckRoll.roll_no==payload.roll_no).first()
     require_before_wash_first(roll, data, ("actual_gsm_before",), ("actual_gsm_after",))
+    stamp_wash_dates(roll, data, ("actual_gsm_before",), ("actual_gsm_after",))
     if roll:
         merge_roll_fields(roll, data)
     else:

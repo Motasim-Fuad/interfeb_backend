@@ -9,6 +9,7 @@ from app.features.admin_config.models import Buyer, Supplier
 from app.features.analytics.models import SupplierMonthlyInput
 from app.features.fabric_inspection.models import FabricInspectionRoll, FabricInspectionRollDefect, FabricInspectionReport
 from app.features.plm.models import Plm, PlmColor
+from app.features.store.models import FabricReceive
 
 
 def month_bounds(year: Optional[int], month: Optional[int]) -> tuple[Optional[date], Optional[date]]:
@@ -122,7 +123,48 @@ def defect_rows(db: Session, *, group: str, buyer_id=None, supplier_id=None, dat
 
 
 def quantity_rows(db: Session, *, group: str, buyer_id=None, supplier_id=None, date_from=None, date_to=None):
-    q = db.query(Plm).options(joinedload(Plm.buyer), joinedload(Plm.supplier), joinedload(Plm.colors).joinedload(PlmColor.rolls))
+    """Received = unique consignment lots. Allocated = factory PLM assignments.
+
+    One consignment can feed many PLMs, so received is counted once per
+    fabric_receive row. Unallocated lots still appear with allocated = 0.
+    """
+    grouped = {}
+
+    def party_row(party):
+        if party is None:
+            return None
+        return grouped.setdefault(str(party.id), {
+            "name": party.name,
+            "plms": 0,
+            "allocated": 0.0,
+            "received": 0.0,
+            "rolls": 0,
+        })
+
+    receives = db.query(FabricReceive).options(
+        joinedload(FabricReceive.buyer),
+        joinedload(FabricReceive.supplier),
+    )
+    if buyer_id:
+        receives = receives.filter(FabricReceive.buyer_id == buyer_id)
+    if supplier_id:
+        receives = receives.filter(FabricReceive.supplier_id == supplier_id)
+    if date_from:
+        receives = receives.filter(FabricReceive.received_at >= date_from)
+    if date_to:
+        receives = receives.filter(FabricReceive.received_at <= date_to)
+    for rec in receives.all():
+        row = party_row(rec.supplier if group == "supplier" else rec.buyer)
+        if row is None:
+            continue
+        qty = rec.received_quantity if rec.received_quantity is not None else rec.fabric_length
+        row["received"] += float(qty or 0)
+
+    q = db.query(Plm).options(
+        joinedload(Plm.buyer),
+        joinedload(Plm.supplier),
+        joinedload(Plm.colors).joinedload(PlmColor.rolls),
+    )
     if buyer_id:
         q = q.filter(Plm.buyer_id == buyer_id)
     if supplier_id:
@@ -131,24 +173,15 @@ def quantity_rows(db: Session, *, group: str, buyer_id=None, supplier_id=None, d
         q = q.filter(Plm.plm_date >= date_from)
     if date_to:
         q = q.filter(Plm.plm_date <= date_to)
-    grouped = {}
     for plm in q.all():
-        party = plm.supplier if group == "supplier" else plm.buyer
-        if party is None:
+        row = party_row(plm.supplier if group == "supplier" else plm.buyer)
+        if row is None:
             continue
-        row = grouped.setdefault(str(party.id), {
-            "name": party.name,
-            "plms": 0,
-            "allocated": 0.0,
-            "received": 0.0,
-            "rolls": 0,
-        })
         row["plms"] += 1
         row["allocated"] += float(plm.allocated_quantity or 0)
-        row["received"] += float(plm.received_quantity or 0)
         row["rolls"] += sum(len(c.rolls) for c in (plm.colors or []))
     out = list(grouped.values())
-    out.sort(key=lambda r: -r["allocated"])
+    out.sort(key=lambda r: -(r["allocated"] or r["received"]))
     return out
 
 

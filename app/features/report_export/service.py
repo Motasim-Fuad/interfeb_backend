@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import urllib.request
+from datetime import date, datetime
 from io import BytesIO
 from html import escape
 from typing import Iterable
@@ -32,6 +33,7 @@ from app.features.shade_check import models as shade_models
 from app.features.color_continuity import models as cc_models
 from app.features.correlation import models as corr_models, routes as corr_routes, service as corr_service
 from app.features.factory_report import routes as factory_routes
+from app.features.report_export.charts import OverviewPie
 
 
 INK = colors.black
@@ -78,12 +80,55 @@ def _fmt(v, digits=2):
 
 
 def _date(v):
-    if not v:
+    if v is None or v == '':
+        return ''
+    if isinstance(v, datetime):
+        return v.strftime('%d-%m-%Y')
+    if isinstance(v, date):
+        return v.strftime('%d-%m-%Y')
+    raw = str(v).strip()
+    if not raw:
         return ''
     try:
-        return v.strftime('%d-%m-%Y')
+        return datetime.strptime(raw[:10], '%Y-%m-%d').strftime('%d-%m-%Y')
     except Exception:
-        return str(v)
+        return raw
+
+
+def _as_date(v):
+    if v is None or v == '':
+        return None
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    raw = str(v).strip()
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw[:10], '%Y-%m-%d').date()
+    except Exception:
+        return None
+
+
+def _first_date(*values):
+    for v in values:
+        d = _as_date(v)
+        if d:
+            return _date(d)
+    return ''
+
+
+def _roll_date(roll, *, after=False, report=None, plm=None):
+    primary = getattr(roll, 'after_wash_date' if after else 'before_wash_date', None)
+    created = getattr(roll, 'created_at', None)
+    updated = getattr(roll, 'updated_at', None)
+    report_d = getattr(report, 'report_date', None) if report is not None else None
+    in_house = getattr(plm, 'received_at', None) if plm is not None else None
+    plm_d = getattr(plm, 'plm_date', None) if plm is not None else None
+    if after:
+        return _first_date(primary, updated, created, report_d, in_house, plm_d)
+    return _first_date(primary, created, report_d, in_house, plm_d)
 
 
 def _unit(plm):
@@ -185,6 +230,18 @@ def _status_cell(value):
     if value in (None, '', 'PENDING'):
         return _p('PENDING' if value == 'PENDING' else '', CENTER)
     return _p(value, CENTER)
+
+
+def _overview(results) -> dict:
+    passed = failed = pending = 0
+    for value in results or []:
+        if value is True or str(value).upper() == 'PASS':
+            passed += 1
+        elif value is False or str(value).upper() == 'FAIL':
+            failed += 1
+        else:
+            pending += 1
+    return {'passed': passed, 'failed': failed, 'pending': pending}
 
 
 def _attachment_path(att: Attachment) -> str | None:
@@ -318,6 +375,19 @@ def _roll_image(db: Session, owner_type: str, owner_id, max_w=28*mm, max_h=20*mm
 
 def _stage_image(db: Session, stage_type: str, report_id, *, fallback_types=(), fallback_roll_type=None, roll_ids=(), max_w=28*mm, max_h=20*mm):
     """One photo for a wash-stage / report table — latest stage attachment, else first legacy roll photo."""
+    photo = _stage_photo(
+        db, stage_type, report_id,
+        fallback_types=fallback_types,
+        fallback_roll_type=fallback_roll_type,
+        roll_ids=roll_ids,
+        max_w=max_w,
+        max_h=max_h,
+    )
+    return photo if photo is not None else _p('')
+
+
+def _stage_photo(db: Session, stage_type: str, report_id, *, fallback_types=(), fallback_roll_type=None, roll_ids=(), max_w=36*mm, max_h=36*mm):
+    """Square swatch photo, or None when the stage has no image."""
     for owner_type in (stage_type, *fallback_types):
         att = _find_attachment(db, owner_type, report_id)
         if att:
@@ -331,7 +401,7 @@ def _stage_image(db: Session, stage_type: str, report_id, *, fallback_types=(), 
                 img = _image_from_att(att, max_w, max_h)
                 if img is not None:
                     return img
-    return _p('')
+    return None
 
 
 def _image_col_spans(data_row_count: int, last_col: int):
@@ -398,6 +468,15 @@ def _doc(buffer, *, landscape_page=False):
         title='Interfab QC Report',
         author='Interfab Shirt Manufacturing Ltd.',
     )
+
+
+def _page_content_width(*, landscape_page=False):
+    return (landscape(A4)[0] if landscape_page else A4[0]) - 16*mm
+
+
+def _fit_col_widths(weights, available):
+    total = float(sum(weights)) or 1.0
+    return [available * (w / total) for w in weights]
 
 
 def _table(data, widths=None, header_rows=1, font=7.0, spans=None, row_colors=None, row_heights=None, extra_cmds=None):
@@ -473,17 +552,22 @@ def _banner(title: str, page_width):
     return banner
 
 
-def _header_story(title: str, plm: Plm, *, color_codes=None, extra_meta=None, landscape_page=False):
+def _header_story(title: str, plm: Plm, *, color_codes=None, extra_meta=None, landscape_page=False, overview=None, swatches=None):
     page_width = (landscape(A4)[0] if landscape_page else A4[0]) - 16*mm
     buyer = plm.buyer.name if plm and plm.buyer else ''
     supplier = plm.supplier.name if plm and plm.supplier else ''
     style_plm = ' / '.join(x for x in [plm.plm_code if plm else '', plm.plm_style if plm else ''] if x)
     codes = list(color_codes or [])
+    half = page_width / 2
+    label_w = 28*mm
+    in_house = _first_date(getattr(plm, 'received_at', None), getattr(plm, 'plm_date', None))
+    plm_date = _date(getattr(plm, 'plm_date', None))
     meta = Table([
         [_p('Buyer', META_LABEL), _p(buyer, META_VALUE), _p('Supplier', META_LABEL), _p(supplier, META_VALUE)],
         [_p('PLM / Style', META_LABEL), _p(style_plm, META_VALUE), _p('Color', META_LABEL), _color_header_value(codes)],
         [_p('Consignment', META_LABEL), _p(getattr(plm, 'consignment', '') or '', META_VALUE), _p('Unit', META_LABEL), _p(_unit(plm), META_VALUE)],
-    ], colWidths=[24*mm, page_width/2 - 24*mm, 24*mm, page_width/2 - 24*mm])
+        [_p('In-house Date', META_LABEL), _p(in_house, META_VALUE), _p('PLM Date', META_LABEL), _p(plm_date, META_VALUE)],
+    ], colWidths=[label_w, half - label_w, label_w, half - label_w])
     meta.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (0, -1), HEADER_BG),
         ('BACKGROUND', (2, 0), (2, -1), HEADER_BG),
@@ -501,6 +585,7 @@ def _header_story(title: str, plm: Plm, *, color_codes=None, extra_meta=None, la
     story = [_banner(title, page_width), Spacer(1, 3*mm), meta]
     if extra_meta:
         story += [Spacer(1, 2.5*mm), extra_meta]
+    story += _media_row(swatches, overview, landscape_page=landscape_page)
     story.append(Spacer(1, 3.5*mm))
     return story
 
@@ -518,6 +603,61 @@ def _section_title(text, landscape_page=False):
         ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
     ]))
     return bar
+
+
+def _swatch_tile(label, image, size):
+    inner = size - 8
+    if isinstance(image, Image):
+        photo = _ClippedPhoto(image, inner, inner)
+    else:
+        photo = _p('No image', SMALL)
+    caption = _p(label, ParagraphStyle('swatchcap', parent=SMALL, fontName='Helvetica-Bold', fontSize=7.2, leading=9, alignment=TA_CENTER))
+    tile = Table([[photo], [caption]], colWidths=[size], rowHeights=[size - 8, 9*mm])
+    tile.setStyle(TableStyle([
+        ('BOX', (0, 0), (-1, -1), 0.7, LINE),
+        ('BACKGROUND', (0, 0), (-1, -1), PAPER),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('VALIGN', (0, 0), (0, 0), 'MIDDLE'),
+        ('LEFTPADDING', (0, 0), (0, 0), 4),
+        ('RIGHTPADDING', (0, 0), (0, 0), 4),
+        ('TOPPADDING', (0, 0), (0, 0), 4),
+        ('BOTTOMPADDING', (0, 0), (0, 0), 2),
+        ('LEFTPADDING', (0, 1), (0, 1), 2),
+        ('RIGHTPADDING', (0, 1), (0, 1), 2),
+        ('TOPPADDING', (0, 1), (0, 1), 1),
+        ('BOTTOMPADDING', (0, 1), (0, 1), 4),
+    ]))
+    return tile
+
+
+def _media_row(items, overview=None, *, landscape_page=False):
+    """One horizontal line: before-wash swatch, after-wash swatch, overview chart."""
+    tiles_src = [(str(label or 'Swatch'), image) for label, image in (items or [])]
+    if not tiles_src and overview is None:
+        return []
+    page_width = _page_content_width(landscape_page=landscape_page)
+    count = len(tiles_src) + (1 if overview is not None else 0)
+    col_w = page_width / max(count, 1)
+    size = min(42*mm, max(30*mm, col_w - 8*mm))
+    cells = [_swatch_tile(label, image, size) for label, image in tiles_src]
+    if overview is not None:
+        cells.append(OverviewPie(
+            overview.get('passed', 0),
+            overview.get('failed', 0),
+            overview.get('pending', 0),
+            size=col_w - 4*mm,
+            title=overview.get('title') or 'Overview',
+        ))
+    grid = Table([cells], colWidths=[col_w] * len(cells))
+    grid.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 2),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 2),
+        ('TOPPADDING', (0, 0), (-1, -1), 0),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
+    ]))
+    return [Spacer(1, 3*mm), grid]
 
 
 def _fabric_inspection(db, plm):
@@ -558,7 +698,14 @@ def _fabric_inspection(db, plm):
         ['Individual Accepted', f'{_fmt(report.individual_standard_snapshot)}%', 'Average Accepted', f'{_fmt(report.average_standard_snapshot)}%'],
         ['In-house Date', _date(report.fabric_in_house_date), 'Inspection Date', _date(report.inspection_date)],
     ], widths=[32*mm, 68*mm, 38*mm, 62*mm], header_rows=0, font=7.5)
-    story = _header_story('FABRICS INSPECTION REPORT — 4 POINTS SYSTEM', plm, color_codes=colors_text, extra_meta=info, landscape_page=True)
+    story = _header_story(
+        'FABRICS INSPECTION REPORT — 4 POINTS SYSTEM',
+        plm,
+        color_codes=colors_text,
+        extra_meta=info,
+        landscape_page=True,
+        overview=_overview(r.is_pass for r in report.rolls),
+    )
     pagew = landscape(A4)[0] - 16*mm
     fixed = [16, 22, 14, 14, 16, 16]
     tail_width = 64*mm
@@ -589,38 +736,49 @@ def _gsm(db, plm):
     stats = gsm_service.compute_report_stats(r.rolls, float(r.standard_gsm or 0), float(r.tolerance_snapshot) if r.tolerance_snapshot is not None else None)
     planned = _planned_color_map(plm)
     codes = _plm_colors(plm, [x.color for x in r.rolls] + [r.color] + list(planned.values()))
-    report_date = _date(r.report_date) or next((_date(x.before_wash_date or x.after_wash_date) for x in r.rolls if x.before_wash_date or x.after_wash_date), '')
+    report_date = _first_date(
+        r.report_date,
+        next((x.before_wash_date or x.after_wash_date for x in r.rolls if x.before_wash_date or x.after_wash_date), None),
+        getattr(plm, 'received_at', None),
+        getattr(plm, 'plm_date', None),
+    )
     info = _table([['Required GSM', _fmt(r.standard_gsm), 'Tolerance', f'±{_fmt(r.tolerance_snapshot)}%', 'Date', report_date]], widths=[30*mm, 24*mm, 24*mm, 24*mm, 20*mm, 32*mm], header_rows=0, font=8)
-    story = _header_story('GSM Check Report', plm, color_codes=codes, extra_meta=info)
+    std = float(r.standard_gsm or 0)
+    tol = float(r.tolerance_snapshot) if r.tolerance_snapshot is not None else None
+    flags = []
+    for x in r.rolls:
+        for actual in (x.actual_gsm_before, x.actual_gsm_after):
+            if actual is None:
+                continue
+            pct = gsm_service.over_less_pct(float(actual), std)
+            flags.append(abs(pct) <= tol if tol is not None else None)
+    swatches = [
+        ('Before Wash', _stage_photo(db, 'gsm_before_wash', r.id, fallback_roll_type='gsm_roll', roll_ids=[x.id for x in r.rolls])),
+        ('After Wash', _stage_photo(db, 'gsm_after_wash', r.id)),
+    ]
+    story = _header_story('GSM Check Report', plm, color_codes=codes, extra_meta=info, overview=_overview(flags), swatches=swatches)
 
     def section(title, after=False):
-        data = [['Roll No', 'Color', 'Require GSM', 'Actual GSM', 'Over / Less %', 'Remarks', 'Fabric Image']]
+        data = [['Roll No', 'Color', 'Require GSM', 'Actual GSM', 'Over / Less %', 'Date', 'Remarks']]
         rows = []
         for x in r.rolls:
             actual = x.actual_gsm_after if after else x.actual_gsm_before
             if actual is None:
                 continue
             rows.append(x)
-        img = _stage_image(
-            db, 'gsm_after_wash' if after else 'gsm_before_wash', r.id,
-            fallback_roll_type='gsm_roll' if not after else None,
-            roll_ids=[x.id for x in rows],
-        )
-        for i, x in enumerate(rows):
+        for x in rows:
             actual = x.actual_gsm_after if after else x.actual_gsm_before
             pct = gsm_service.over_less_pct(float(actual), float(r.standard_gsm or 0))
             rem = x.remarks_after if after else x.remarks_before
-            data.append([x.roll_no, _color_chip(_color_for(plm, x.roll_no, x.color, planned)), _fmt(r.standard_gsm), _fmt(actual), _fmt(pct), rem or '', img if i == 0 else ''])
+            data.append([x.roll_no, _color_chip(_color_for(plm, x.roll_no, x.color, planned)), _fmt(r.standard_gsm), _fmt(actual), _fmt(pct), _roll_date(x, after=after, report=r, plm=plm), rem or ''])
         if rows:
             avg = stats['avg_over_less_after_pct' if after else 'avg_over_less_before_pct']
             passed = stats['pass_after' if after else 'pass_before']
-            data.append(['AVG', '', '', '', f'{_fmt(avg)}%', 'PASS' if passed is True else 'FAIL' if passed is False else '', ''])
+            data.append(['AVG', '', '', '', f'{_fmt(avg)}%', '', 'PASS' if passed is True else 'FAIL' if passed is False else ''])
         else:
-            data.append(['—', '', _fmt(r.standard_gsm), '', '', 'No data', ''])
-        return KeepTogether([_section_title(title), Spacer(1, 1.5*mm), _stage_photo_table(
-            data, [18*mm, 28*mm, 24*mm, 24*mm, 26*mm, 30*mm, 24*mm],
-            image_col=6, n_data_rows=len(rows), extra_rows=1, font=7.1,
-        )])
+            data.append(['—', '', _fmt(r.standard_gsm), '', '', '', 'No data'])
+        widths = _fit_col_widths([16, 24, 22, 22, 24, 22, 26], _page_content_width())
+        return KeepTogether([_section_title(title), Spacer(1, 1.5*mm), _table(data, widths=widths, header_rows=1, font=7.1)])
 
     story += [section('BEFORE WASH', False), Spacer(1, 4*mm), section('AFTER WASH', True)]
     return story, False
@@ -634,34 +792,41 @@ def _moisture(db, plm):
     standard_label = moisture_cfg.get('standard_label') or plm.fabric_composition or 'Selected composition'
     planned = _planned_color_map(plm)
     codes = _plm_colors(plm, [x.color for x in r.rolls] + list(planned.values()))
+    moisture_date = _first_date(r.report_date, getattr(plm, 'received_at', None), getattr(plm, 'plm_date', None))
     info = _table([
         ['Composition Standard', standard_label, 'Acceptance', f'{_fmt(r.acceptance_snapshot)}%'],
         ['Vendor', r.vendor or '', 'Factory', r.factory or 'Interfab Shirt Mfg. Ltd.'],
+        ['Date', moisture_date, 'In-house Date', _first_date(getattr(plm, 'received_at', None), getattr(plm, 'plm_date', None))],
     ], widths=[34*mm, 63*mm, 28*mm, 69*mm], header_rows=0, font=7.5)
-    story = _header_story('Moisture Check List', plm, color_codes=codes, extra_meta=info)
+    acc = float(r.acceptance_snapshot) if r.acceptance_snapshot is not None else None
+    flags = []
+    for x in r.rolls:
+        for val in (x.swatch_rating_before, x.swatch_rating_after):
+            if val is None:
+                continue
+            flags.append(float(val) <= acc if acc is not None else None)
+    swatches = [
+        ('Before Wash', _stage_photo(db, 'moisture_before_wash', r.id)),
+        ('After Wash', _stage_photo(db, 'moisture_after_wash', r.id)),
+    ]
+    story = _header_story('Moisture Check List', plm, color_codes=codes, extra_meta=info, overview=_overview(flags), swatches=swatches)
 
     def section(title, after=False):
-        data = [['Roll No', 'Fabric Composition', 'Color', 'Rating', 'Pass/Fail', 'Date', 'Fabric Image']]
+        data = [['Roll No', 'Fabric Composition', 'Color', 'Rating', 'Pass/Fail', 'Date']]
         rows = []
         for x in r.rolls:
             val = x.swatch_rating_after if after else x.swatch_rating_before
             if val is None:
                 continue
             rows.append(x)
-        img = _stage_image(
-            db, 'moisture_after_wash' if after else 'moisture_before_wash', r.id,
-        )
-        for i, x in enumerate(rows):
+        for x in rows:
             val = x.swatch_rating_after if after else x.swatch_rating_before
-            d = x.after_wash_date if after else x.before_wash_date
             passed = float(val) <= float(r.acceptance_snapshot) if r.acceptance_snapshot is not None else None
-            data.append([x.roll_no, x.fabric_composition or plm.fabric_composition or '', _color_chip(_color_for(plm, x.roll_no, x.color, planned)), f'{_fmt(val)}%', 'PASS' if passed else 'FAIL' if passed is False else '', _date(d), img if i == 0 else ''])
+            data.append([x.roll_no, x.fabric_composition or plm.fabric_composition or '', _color_chip(_color_for(plm, x.roll_no, x.color, planned)), f'{_fmt(val)}%', 'PASS' if passed else 'FAIL' if passed is False else '', _roll_date(x, after=after, report=r, plm=plm)])
         if not rows:
-            data.append(['—', '', '', '', 'No data', '', ''])
-        return KeepTogether([_section_title(title), Spacer(1, 1.5*mm), _stage_photo_table(
-            data, [18*mm, 36*mm, 26*mm, 20*mm, 22*mm, 24*mm, 24*mm],
-            image_col=6, n_data_rows=len(rows), font=7.1,
-        )])
+            data.append(['—', '', '', '', 'No data', ''])
+        widths = _fit_col_widths([18, 42, 28, 22, 24, 26], _page_content_width())
+        return KeepTogether([_section_title(title), Spacer(1, 1.5*mm), _table(data, widths=widths, header_rows=1, font=7.1)])
 
     story += [section('BEFORE WASH', False), Spacer(1, 4*mm), section('AFTER WASH', True)]
     return story, False
@@ -677,14 +842,25 @@ def _skew(db, plm):
     codes = _plm_colors(plm, [x.colour_code for x in r.rolls] + list(planned.values()))
     info = _table([
         ['Receive Qty', f'{_fmt(r.receive_qty)} {r.quantity_unit_snapshot.upper()}', 'Total Roll', r.total_roll or '', 'Fabric Construction', r.fabric_construction or ''],
-        ['In-house Date', _date(r.in_house_date), 'Fabric Width Standard', r.fabric_width_label_snapshot or '', 'Fabric Type', 'STRIPE' if r.is_stripe else 'SOLID'],
-        ['Acceptance', f'{_fmt(std)} {r.measurement_unit_snapshot.upper()}', '', '', '', ''],
+        ['In-house Date', _first_date(r.in_house_date, getattr(plm, 'received_at', None), getattr(plm, 'plm_date', None)), 'Fabric Width Standard', r.fabric_width_label_snapshot or '', 'Fabric Type', 'STRIPE' if r.is_stripe else 'SOLID'],
+        ['Acceptance', f'{_fmt(std)} {r.measurement_unit_snapshot.upper()}', 'Date', _first_date(r.report_date, r.in_house_date, getattr(plm, 'plm_date', None)), '', ''],
     ], widths=[28*mm, 36*mm, 25*mm, 25*mm, 35*mm, 45*mm], header_rows=0, font=7.5)
     extra = info
-    story = _header_story('Skew & Bowing Check Report', plm, color_codes=codes, extra_meta=extra)
+    flags = []
+    for x in r.rolls:
+        for ac, bd in ((x.ac_value_before, x.bd_value_before), (x.ac_value_after, x.bd_value_after)):
+            if ac is None or bd is None:
+                continue
+            amount = abs(float(ac) - float(bd))
+            flags.append(amount <= std if std is not None else None)
+    swatches = [
+        ('Before Wash', _stage_photo(db, 'skew_before_wash', r.id, fallback_types=('skew_bowing_report',), fallback_roll_type='skew_bowing_roll', roll_ids=[x.id for x in r.rolls])),
+        ('After Wash', _stage_photo(db, 'skew_after_wash', r.id)),
+    ]
+    story = _header_story('Skew & Bowing Check Report', plm, color_codes=codes, extra_meta=extra, overview=_overview(flags), swatches=swatches)
 
     def section(title, after=False):
-        data = [['Roll No', 'Color', 'AC', 'BD', '|AC-BD|', 'AC+BD', 'Skew %', 'Result', 'Fabric Image']]
+        data = [['Roll No', 'Color', 'AC', 'BD', '|AC-BD|', 'AC+BD', 'Skew %', 'Date', 'Result']]
         rows = []
         for x in r.rolls:
             ac = x.ac_value_after if after else x.ac_value_before
@@ -692,29 +868,21 @@ def _skew(db, plm):
             if ac is None and bd is None:
                 continue
             rows.append(x)
-        img = _stage_image(
-            db, 'skew_after_wash' if after else 'skew_before_wash', r.id,
-            fallback_types=('skew_bowing_report',) if not after else (),
-            fallback_roll_type='skew_bowing_roll' if not after else None,
-            roll_ids=[x.id for x in rows],
-        )
-        for i, x in enumerate(rows):
+        for x in rows:
             ac = x.ac_value_after if after else x.ac_value_before
             bd = x.bd_value_after if after else x.bd_value_before
             pct = skew_service.skew_percent(ac, bd, None, r.measurement_unit_snapshot)
             amount = abs(float(ac) - float(bd)) if ac is not None and bd is not None else None
             total = float(ac) + float(bd) if ac is not None and bd is not None else None
             passed = amount <= std if amount is not None and std is not None else None
-            data.append([x.roll_no, _color_chip(_color_for(plm, x.roll_no, x.colour_code, planned)), _fmt(ac), _fmt(bd), _fmt(amount), _fmt(total), f'{_fmt(pct)}%', 'PASS' if passed else 'FAIL' if passed is False else '', img if i == 0 else ''])
+            data.append([x.roll_no, _color_chip(_color_for(plm, x.roll_no, x.colour_code, planned)), _fmt(ac), _fmt(bd), _fmt(amount), _fmt(total), f'{_fmt(pct)}%', _roll_date(x, after=after, report=r, plm=plm), 'PASS' if passed else 'FAIL' if passed is False else ''])
         if rows:
             avg = stats['avg_percent_after' if after else 'avg_percent_before']
             data.append(['AVG', '', '', '', '', '', f'{_fmt(avg)}%' if avg is not None else '', '', ''])
         else:
-            data.append(['—', '', '', '', '', '', '', 'No data', ''])
-        return KeepTogether([_section_title(title), Spacer(1, 1.5*mm), _stage_photo_table(
-            data, [16*mm, 26*mm, 16*mm, 16*mm, 18*mm, 18*mm, 20*mm, 20*mm, 24*mm],
-            image_col=8, n_data_rows=len(rows), extra_rows=1, font=6.8,
-        )])
+            data.append(['—', '', '', '', '', '', '', '', 'No data'])
+        widths = _fit_col_widths([16, 24, 14, 14, 18, 16, 18, 22, 20], _page_content_width())
+        return KeepTogether([_section_title(title), Spacer(1, 1.5*mm), _table(data, widths=widths, header_rows=1, font=6.8)])
 
     story += [section('BEFORE WASH', False), Spacer(1, 4*mm), section('AFTER WASH', True)]
     return story, False
@@ -726,21 +894,21 @@ def _relaxation(db, plm):
         return None
     planned = _planned_color_map(plm)
     codes = _plm_colors(plm, [x.color_code for x in r.rolls] + [r.color] + list(planned.values()))
-    story = _header_story('FABRIC RELAXATION TEST REPORT', plm, color_codes=codes, landscape_page=True)
-    data = [['Color', 'Roll No', f'Fabric {_qty_unit(plm)}', 'Start Time', 'Before L', 'Before W', 'After Time', 'After L', 'After W', 'Change L %', 'Change W %', 'Remark', 'Fabric Image']]
-    img = _stage_image(db, 'relaxation_report', r.id, fallback_roll_type='relaxation_roll', roll_ids=[x.id for x in r.rolls])
-    for i, x in enumerate(r.rolls):
+    swatches = [
+        ('Fabric Image', _stage_photo(db, 'relaxation_report', r.id, fallback_roll_type='relaxation_roll', roll_ids=[x.id for x in r.rolls])),
+    ]
+    story = _header_story('FABRIC RELAXATION TEST REPORT', plm, color_codes=codes, landscape_page=True, overview=_overview([None] * len(r.rolls)), swatches=swatches)
+    data = [['Color', 'Roll No', f'Fabric {_qty_unit(plm)}', 'Start Time', 'Before L', 'Before W', 'After Time', 'After L', 'After W', 'Change L %', 'Change W %', 'Remark']]
+    for x in r.rolls:
         f = relax_service.compute_roll_fields(x)
         data.append([
             _color_chip(_color_for(plm, x.roll_no, x.color_code, planned)), x.roll_no, _fmt(x.fabric_yds_mtr), x.before_relax_start_time or '',
             _fmt(x.before_relax_length), _fmt(x.before_relax_width), x.after_relax_time or '',
             _fmt(x.after_relax_length), _fmt(x.after_relax_width), _fmt(f['shrinkage_length_pct']),
-            _fmt(f['shrinkage_width_pct']), x.remark or '', img if i == 0 else '',
+            _fmt(f['shrinkage_width_pct']), x.remark or '',
         ])
-    story += [_stage_photo_table(
-        data, [22*mm, 16*mm, 18*mm, 22*mm, 16*mm, 16*mm, 22*mm, 16*mm, 16*mm, 20*mm, 20*mm, 26*mm, 24*mm],
-        image_col=12, n_data_rows=len(r.rolls), font=6.2,
-    ), Spacer(1, 3*mm)]
+    widths = _fit_col_widths([22, 16, 18, 22, 16, 16, 22, 16, 16, 20, 20, 28], _page_content_width(landscape_page=True))
+    story += [_table(data, widths=widths, header_rows=1, font=6.2), Spacer(1, 3*mm)]
     story += [_p(f'Relaxation time (Dashboard): {r.relaxation_hours_snapshot or 12} HOURS', LABEL)]
     return story, True
 
@@ -755,7 +923,7 @@ def _shrinkage(db, plm):
         return None
     planned = _planned_color_map(plm)
     codes = _plm_colors(plm, [r.color] + list(planned.values()))
-    story = _header_story('Shrinkage & Pattern Adjustment Report', plm, color_codes=codes, landscape_page=True)
+    story = _header_story('Shrinkage & Pattern Adjustment Report', plm, color_codes=codes, landscape_page=True, overview=_overview([None] * len(r.rolls)))
     data = [['Roll', 'Qty', 'Reading', 'Before L', 'Before W', 'After L', 'After W', 'L %', 'W %', 'Avg L %', 'Avg W %', 'Pattern', 'Shade']]
     spans = []
     for x in r.rolls:
@@ -800,16 +968,30 @@ def _shade(db, plm):
     width = [p for p in points if p.get('check_type') == 'width']
     planned = _planned_color_map(plm)
     codes = _plm_colors(plm, [roll.colour for roll in r.rolls] + list(planned.values()))
-    story = _header_story('Fabric Shade Check Report', plm, color_codes=codes, landscape_page=True)
+    shade_flags = []
+    for roll in r.rolls:
+        for result in (roll.results or []):
+            for value in (result.first_ok, result.middle_ok, result.last_ok):
+                if value is not None:
+                    shade_flags.append(value)
+    story = _header_story(
+        'Fabric Shade Check Report',
+        plm,
+        color_codes=codes,
+        landscape_page=True,
+        overview=_overview(shade_flags or [None] * len(r.rolls)),
+        swatches=[
+            ('Fabric Image', _stage_photo(db, 'shade_check_report', r.id, fallback_roll_type='shade_check_roll', roll_ids=[roll.id for roll in r.rolls])),
+        ],
+    )
     headers = ['Date', 'Colour', 'Cons', 'Roll No'] + [p.get('label', p.get('check_key', '')) for p in length]
     for p in width:
         headers += [f"{p.get('label', '')} FIRST", f"{p.get('label', '')} MIDDLE", f"{p.get('label', '')} LAST"]
-    headers += ['Remarks', 'Fabric Image']
+    headers += ['Remarks']
     data = [headers]
-    img = _stage_image(db, 'shade_check_report', r.id, fallback_roll_type='shade_check_roll', roll_ids=[roll.id for roll in r.rolls])
-    for i, roll in enumerate(r.rolls):
+    for roll in r.rolls:
         by = {x.point_key: x for x in roll.results}
-        row = [_date(roll.roll_date), _color_chip(_color_for(plm, roll.roll_no, roll.colour, planned)), _fmt(roll.cons), roll.roll_no]
+        row = [_first_date(roll.roll_date, getattr(roll, 'created_at', None), getattr(plm, 'received_at', None), getattr(plm, 'plm_date', None)), _color_chip(_color_for(plm, roll.roll_no, roll.colour, planned)), _fmt(roll.cons), roll.roll_no]
         for p in length:
             x = by.get(p.get('check_key'))
             row.append('OK' if x and x.first_ok is True else 'NG' if x and x.first_ok is False else '')
@@ -818,15 +1000,14 @@ def _shade(db, plm):
             for v in [getattr(x, 'first_ok', None) if x else None, getattr(x, 'middle_ok', None) if x else None, getattr(x, 'last_ok', None) if x else None]:
                 row.append('OK' if v is True else 'NG' if v is False else '')
         row.append(roll.remarks or '')
-        row.append(img if i == 0 else '')
         data.append(row)
-    available = landscape(A4)[0] - 16*mm
-    widths = [18*mm, 24*mm, 14*mm, 16*mm]
-    remaining_cols = len(headers) - 6
-    rem = available - sum(widths) - 42*mm
-    each = rem / max(1, remaining_cols)
-    widths += [each] * remaining_cols + [22*mm, 24*mm]
-    story += [_stage_photo_table(data, widths, image_col=len(headers) - 1, n_data_rows=len(r.rolls), font=5.2)]
+    available = _page_content_width(landscape_page=True)
+    mid = max(0, len(headers) - 5)
+    weights = [18, 24, 14, 16] + ([10] * mid) + [22]
+    if len(weights) != len(headers):
+        weights = [10] * max(len(headers), 1)
+    widths = _fit_col_widths(weights, available)
+    story += [_table(data, widths=widths, header_rows=1, font=5.2)]
     return story, True
 
 
@@ -835,7 +1016,7 @@ def _continuity(db, plm):
     if not r:
         return None
     codes = _plm_colors(plm, list(_planned_color_map(plm).values()))
-    story = _header_story('Master Color Continuity Card', plm, color_codes=codes)
+    story = _header_story('Master Color Continuity Card', plm, color_codes=codes, overview=_overview([None] * len(r.rolls)))
     data = [['Roll No', 'Before Wash / Non Wash Shade', 'After Wash Shade', f'Qty ({_qty_unit(plm)})']]
     for x in r.rolls:
         data.append([x.roll_no, x.shade_group_before or '', x.shade_group_after or '', _fmt(x.yardage)])
@@ -852,7 +1033,8 @@ def _correlation(db, plm):
         for k, v in corr_service.compute_roll_fields(row, report.measurement_unit_snapshot, report.quantity_unit_snapshot).items():
             setattr(row, k, v)
 
-    inner_widths = [12*mm, 25*mm, 14*mm, 14*mm, 15*mm, 17*mm, 13*mm, 8*mm, 14*mm]
+    inner_widths = _fit_col_widths([12, 25, 14, 14, 15, 17, 13, 8, 14], _page_content_width(landscape_page=True))
+    factory_widths = _fit_col_widths([12, 48, 14, 14, 15, 17, 13, 8, 14], _page_content_width(landscape_page=True))
     story = []
     rolls = list(report.rolls or [])
     chunks = [rolls[i:i + 9] for i in range(0, len(rolls), 9)] or [[]]
@@ -860,7 +1042,15 @@ def _correlation(db, plm):
     for ci, chunk in enumerate(chunks):
         if ci:
             story.append(PageBreak())
-        story += _header_story('Fabric Correlation Report', plm, color_codes=codes, landscape_page=True)
+        story += _header_story(
+            'Fabric Correlation Report',
+            plm,
+            color_codes=codes,
+            landscape_page=True,
+            overview=_overview(
+                [getattr(x, 'mill_pass', None) for x in rolls] + [getattr(x, 'factory_pass', None) for x in rolls]
+            ),
+        )
         mill = [['Roll No', 'Defect Point', f'Length ({report.quantity_unit_snapshot.upper()})', f'Width ({report.measurement_unit_snapshot.upper()})', 'Total Point', 'Average Point', 'Standard', 'SCS', 'Pass/Fail']]
         factory = [['Roll No', 'Defects', f'Length ({report.quantity_unit_snapshot.upper()})', f'Width ({report.measurement_unit_snapshot.upper()})', 'Total Point', 'Average Point', 'Standard', 'SCS', 'Pass/Fail']]
         for x in chunk:
@@ -881,15 +1071,15 @@ def _correlation(db, plm):
                 _fmt(getattr(x, 'factory_average_point', None)), _fmt(x.standard), x.scs,
                 'PASS' if getattr(x, 'factory_pass', None) is True else 'FAIL' if getattr(x, 'factory_pass', None) is False else 'PENDING',
             ])
-        left = [_section_title('Mill Report'), Spacer(1, 1.5*mm), _table(mill, widths=inner_widths, header_rows=1, font=4.4)]
-        right = [_section_title('Factory Report'), Spacer(1, 1.5*mm), _table(factory, widths=inner_widths, header_rows=1, font=4.4)]
-        holder = Table([[left, right]], colWidths=[136*mm, 136*mm], hAlign='LEFT')
-        holder.setStyle(TableStyle([
-            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-            ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 4),
-            ('TOPPADDING', (0, 0), (-1, -1), 0), ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
-        ]))
-        story.append(holder)
+        story += [
+            _section_title('Mill Report', landscape_page=True),
+            Spacer(1, 1.5*mm),
+            _table(mill, widths=inner_widths, header_rows=1, font=6.2),
+            Spacer(1, 4*mm),
+            _section_title('Factory Report', landscape_page=True),
+            Spacer(1, 1.5*mm),
+            _table(factory, widths=factory_widths, header_rows=1, font=6.2),
+        ]
     return story, True
 
 
@@ -944,35 +1134,31 @@ def _factory(db, plm):
     mill_width_text = _range_text(mill_widths)
     factory_width_text = _range_text(factory_widths)
     codes = _plm_colors(plm, [report.color] + [c.colour_code for r, c in planned])
-    story = _header_story('Factory Report', plm, color_codes=codes, landscape_page=True)
+    factory_flags = [row.is_pass for row in (source.rolls if source else [])] or [mill_pass, report.is_pass]
+    story = _header_story('Factory Report', plm, color_codes=codes, landscape_page=True, overview=_overview(factory_flags))
+    pagew = _page_content_width(landscape_page=True)
 
     def summary_panel(title, *, yardage, pieces, width_text, total_point, avg_point, percentage, stage, status):
         info = _table([
             ['Customer', plm.buyer.name if plm.buyer else '', 'Job No.', report.job_no or plm.plm_code],
             ['Construction', report.construction or plm.fabric_composition or '', 'Color', report.color or (', '.join(codes) if codes else '')],
             ['Order Qty', f'{_fmt(report.order_qty)} {_qty_unit(plm)}', 'Inspection Date', _date(report.inspection_date)],
-        ], widths=[22*mm, 44*mm, 20*mm, 42*mm], header_rows=0, font=6.1)
+        ], widths=_fit_col_widths([22, 44, 20, 42], pagew), header_rows=0, font=6.8)
         status_table = _table([
             ['Inspection Yardage', f'{_fmt(yardage)} {_qty_unit(plm)}', 'Inspection Pieces', pieces],
             ['Actual Width', width_text, 'Inspection %', f'{_fmt(percentage)}%' if percentage is not None else ''],
             ['Inspection Stage', stage, 'Total Point', _fmt(total_point)],
-        ], widths=[28*mm, 34*mm, 28*mm, 38*mm], header_rows=0, font=5.9)
+        ], widths=_fit_col_widths([28, 34, 28, 38], pagew), header_rows=0, font=6.6)
         result = _table([
             ['Average Shipment Point', 'Actual', 'Standard', 'Pass/Fail'],
             ['', _fmt(avg_point), _fmt(standard), 'PASS' if status is True else 'FAIL' if status is False else 'PENDING'],
-        ], widths=[44*mm, 27*mm, 27*mm, 30*mm], header_rows=1, font=6.2)
-        return [_section_title(title), Spacer(1, 1.5*mm), info, Spacer(1, 2*mm), _p('Inspection Status', LABEL), status_table, Spacer(1, 2*mm), _p('Result', LABEL), result]
+        ], widths=_fit_col_widths([44, 27, 27, 30], pagew), header_rows=1, font=7.0)
+        return [_section_title(title, landscape_page=True), Spacer(1, 1.5*mm), info, Spacer(1, 2*mm), _p('Inspection Status', LABEL), status_table, Spacer(1, 2*mm), _p('Result', LABEL), result]
 
     mill_pct = 100.0 if mill_length > 0 else None
-    left = summary_panel('Supplier / Mill Summary', yardage=mill_length or plm.allocated_quantity, pieces=len(planned), width_text=mill_width_text, total_point=mill_points, avg_point=mill_avg, percentage=mill_pct, stage='Supplier Report', status=mill_pass)
-    right = summary_panel('Factory Inspection', yardage=report.inspection_yardage, pieces=report.inspection_pieces or 0, width_text=factory_width_text, total_point=report.total_point, avg_point=report.avg_shipment_point, percentage=report.inspection_percentage, stage=report.inspection_stage or 'Final', status=report.is_pass)
-    holder = Table([[left, right]], colWidths=[136*mm, 136*mm], hAlign='LEFT')
-    holder.setStyle(TableStyle([
-        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
-        ('LEFTPADDING', (0, 0), (-1, -1), 0), ('RIGHTPADDING', (0, 0), (-1, -1), 4),
-        ('TOPPADDING', (0, 0), (-1, -1), 0), ('BOTTOMPADDING', (0, 0), (-1, -1), 0),
-    ]))
-    story += [holder]
+    story += summary_panel('Supplier / Mill Summary', yardage=mill_length or plm.allocated_quantity, pieces=len(planned), width_text=mill_width_text, total_point=mill_points, avg_point=mill_avg, percentage=mill_pct, stage='Supplier Report', status=mill_pass)
+    story += [Spacer(1, 5*mm)]
+    story += summary_panel('Factory Inspection', yardage=report.inspection_yardage, pieces=report.inspection_pieces or 0, width_text=factory_width_text, total_point=report.total_point, avg_point=report.avg_shipment_point, percentage=report.inspection_percentage, stage=report.inspection_stage or 'Final', status=report.is_pass)
     return story, True
 
 

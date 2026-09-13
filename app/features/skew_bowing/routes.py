@@ -1,3 +1,4 @@
+from datetime import date
 from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,7 +12,7 @@ from app.features.attachments.service import get_attachments, attach_stage_photo
 from app.features.plm.models import Plm
 from app.features.store.service import resolve_qc_float, get_qc_value
 from app.features.admin_config.service import parse_optional_float
-from app.core.roll_payload import merge_roll_fields, require_before_wash_first
+from app.core.roll_payload import merge_roll_fields, require_before_wash_first, stamp_wash_dates
 
 router=APIRouter(prefix="/skew-bowing",tags=["Skew & Bowing"])
 
@@ -44,7 +45,7 @@ def create_report(payload:schemas.ReportCreate,db:Session=Depends(get_db),_=Depe
     legacy_width_id=None
     total_roll=sum(len(c.rolls) for c in plm.colors)
     report=models.SkewBowingReport(
-        plm_id=plm.id,report_date=payload.report_date,
+        plm_id=plm.id,report_date=payload.report_date or date.today(),
         receive_qty=plm.allocated_quantity or plm.received_quantity or payload.receive_qty,
         total_roll=total_roll,fabric_construction=plm.fabric_composition,
         in_house_date=plm.received_at or payload.in_house_date,
@@ -81,6 +82,7 @@ def upsert_roll(report_id:UUID,payload:schemas.RollIn,db:Session=Depends(get_db)
     data["reference_fabric_length"]=None
     roll=db.query(models.SkewBowingRoll).filter(models.SkewBowingRoll.report_id==report_id,models.SkewBowingRoll.roll_no==payload.roll_no).first()
     require_before_wash_first(roll, data, ("ac_value_before","bd_value_before"), ("ac_value_after","bd_value_after"))
+    stamp_wash_dates(roll, data, ("ac_value_before","bd_value_before"), ("ac_value_after","bd_value_after"))
     if roll:
         merge_roll_fields(roll, data)
     else:

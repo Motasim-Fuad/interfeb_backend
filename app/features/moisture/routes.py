@@ -1,3 +1,4 @@
+from datetime import date
 from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException
@@ -11,7 +12,7 @@ from app.features.plm.models import Plm
 from app.features.store.service import resolve_qc_float
 from app.features.attachments.service import attach_stage_photos
 from app.features.admin_config.service import parse_optional_float
-from app.core.roll_payload import merge_roll_fields, require_before_wash_first
+from app.core.roll_payload import merge_roll_fields, require_before_wash_first, stamp_wash_dates
 
 router = APIRouter(prefix="/moisture", tags=["Moisture Check"])
 
@@ -53,7 +54,7 @@ def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), 
 
     report = models.MoistureCheckReport(
         plm_id=plm.id,
-        report_date=payload.report_date,
+        report_date=payload.report_date or date.today(),
         report_time=payload.report_time,
         vendor=plm.supplier.name if plm.supplier else payload.vendor,
         factory=payload.factory,
@@ -88,6 +89,7 @@ def upsert_roll(report_id: UUID, payload: schemas.RollIn, db: Session = Depends(
     plm = db.query(Plm).get(report.plm_id)
     data['fabric_composition'] = plm.fabric_composition if plm else data.get('fabric_composition')
     require_before_wash_first(roll, data, ("swatch_rating_before",), ("swatch_rating_after",))
+    stamp_wash_dates(roll, data, ("swatch_rating_before",), ("swatch_rating_after",))
     if roll:
         merge_roll_fields(roll, data)
     else:

@@ -267,6 +267,27 @@ def inspection_rolls(
     }
 
 
+@router.get("/analysis-overview", response_model=schemas.AnalysisOverview)
+def analysis_overview(
+    year: Optional[int] = None,
+    month: Optional[int] = None,
+    buyer_id: Optional[UUID] = None,
+    supplier_id: Optional[UUID] = None,
+    db: Session = Depends(get_db),
+):
+    """Chart source for the Analytics page: quality, defects and quantity in one payload."""
+    from app.features.analytics.service import month_bounds, supplier_quality_rows, buyer_quality_rows, defect_rows, quantity_rows
+    date_from, date_to = month_bounds(year, month)
+    return {
+        "supplier_quality": supplier_quality_rows(db, buyer_id=buyer_id, supplier_id=supplier_id, date_from=date_from, date_to=date_to),
+        "buyer_quality": buyer_quality_rows(db, buyer_id=buyer_id, supplier_id=supplier_id, date_from=date_from, date_to=date_to),
+        "supplier_defects": defect_rows(db, group="supplier", buyer_id=buyer_id, supplier_id=supplier_id, date_from=date_from, date_to=date_to),
+        "buyer_defects": defect_rows(db, group="buyer", buyer_id=buyer_id, supplier_id=supplier_id, date_from=date_from, date_to=date_to),
+        "supplier_quantity": quantity_rows(db, group="supplier", buyer_id=buyer_id, supplier_id=supplier_id, date_from=date_from, date_to=date_to),
+        "buyer_quantity": quantity_rows(db, group="buyer", buyer_id=buyer_id, supplier_id=supplier_id, date_from=date_from, date_to=date_to),
+    }
+
+
 @router.get("/supplier-monthly-inputs", response_model=List[schemas.SupplierMonthlyInputOut])
 def list_monthly_inputs(year: int, month: int, db: Session = Depends(get_db)):
     rows = (

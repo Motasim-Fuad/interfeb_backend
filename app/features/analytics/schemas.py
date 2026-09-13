@@ -85,3 +85,34 @@ class SupplierMonthlyInputOut(SupplierMonthlyInputIn):
     class Config:
         from_attributes = True
 
+
+class QualityAggRow(BaseModel):
+    name: str
+    total: int = 0
+    passed: int = 0
+    failed: int = 0
+    pass_rate: Optional[float] = None
+
+
+class DefectAggRow(BaseModel):
+    name: str
+    total_count: int = 0
+    total_points: int = 0
+
+
+class QuantityAggRow(BaseModel):
+    name: str
+    plms: int = 0
+    allocated: float = 0
+    received: float = 0
+    rolls: int = 0
+
+
+class AnalysisOverview(BaseModel):
+    supplier_quality: list[QualityAggRow] = []
+    buyer_quality: list[QualityAggRow] = []
+    supplier_defects: list[DefectAggRow] = []
+    buyer_defects: list[DefectAggRow] = []
+    supplier_quantity: list[QuantityAggRow] = []
+    buyer_quantity: list[QuantityAggRow] = []
+
