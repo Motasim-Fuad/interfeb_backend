@@ -2,13 +2,13 @@ from calendar import monthrange
 from datetime import date
 from typing import Optional
 
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.orm import Session, joinedload
 
 from app.features.admin_config.models import Buyer, Supplier
 from app.features.analytics.models import SupplierMonthlyInput
 from app.features.fabric_inspection.models import FabricInspectionRoll, FabricInspectionRollDefect, FabricInspectionReport
-from app.features.plm.models import Plm, PlmColor
+from app.features.plm.models import Plm, PlmColor, PlmRoll
 from app.features.store.models import FabricReceive
 
 
@@ -29,12 +29,19 @@ def period_label(year: Optional[int], month: Optional[int]) -> str:
     return "All periods"
 
 
-def supplier_quality_rows(db: Session, *, buyer_id=None, supplier_id=None, date_from=None, date_to=None):
+def _quality_rows(db: Session, party, join_on, *, buyer_id=None, supplier_id=None, date_from=None, date_to=None):
     q = (
-        db.query(FabricInspectionRoll, Plm, Supplier)
+        db.query(
+            party.id,
+            party.name,
+            func.count(FabricInspectionRoll.id),
+            func.sum(case((FabricInspectionRoll.is_pass.is_(True), 1), else_=0)),
+            func.sum(case((FabricInspectionRoll.is_pass.is_(False), 1), else_=0)),
+        )
+        .select_from(FabricInspectionRoll)
         .join(FabricInspectionReport, FabricInspectionReport.id == FabricInspectionRoll.report_id)
         .join(Plm, Plm.id == FabricInspectionReport.plm_id)
-        .join(Supplier, Supplier.id == Plm.supplier_id)
+        .join(party, party.id == join_on)
     )
     if buyer_id:
         q = q.filter(Plm.buyer_id == buyer_id)
@@ -44,53 +51,26 @@ def supplier_quality_rows(db: Session, *, buyer_id=None, supplier_id=None, date_
         q = q.filter(FabricInspectionReport.inspection_date >= date_from)
     if date_to:
         q = q.filter(FabricInspectionReport.inspection_date <= date_to)
-    grouped = {}
-    for roll, plm, supplier in q.all():
-        row = grouped.setdefault(str(supplier.id), {"name": supplier.name, "total": 0, "passed": 0, "failed": 0})
-        row["total"] += 1
-        if roll.is_pass is True:
-            row["passed"] += 1
-        elif roll.is_pass is False:
-            row["failed"] += 1
     out = []
-    for item in grouped.values():
-        total = item["total"]
-        item["pass_rate"] = round(item["passed"] / total * 100, 1) if total else None
-        out.append(item)
+    for _, name, total, passed, failed in q.group_by(party.id, party.name).all():
+        total = int(total or 0)
+        out.append({
+            "name": name,
+            "total": total,
+            "passed": int(passed or 0),
+            "failed": int(failed or 0),
+            "pass_rate": round(int(passed or 0) / total * 100, 1) if total else None,
+        })
     out.sort(key=lambda r: (r["pass_rate"] is None, -(r["pass_rate"] or 0), r["name"]))
     return out
+
+
+def supplier_quality_rows(db: Session, *, buyer_id=None, supplier_id=None, date_from=None, date_to=None):
+    return _quality_rows(db, Supplier, Plm.supplier_id, buyer_id=buyer_id, supplier_id=supplier_id, date_from=date_from, date_to=date_to)
 
 
 def buyer_quality_rows(db: Session, *, buyer_id=None, supplier_id=None, date_from=None, date_to=None):
-    q = (
-        db.query(FabricInspectionRoll, Plm, Buyer)
-        .join(FabricInspectionReport, FabricInspectionReport.id == FabricInspectionRoll.report_id)
-        .join(Plm, Plm.id == FabricInspectionReport.plm_id)
-        .join(Buyer, Buyer.id == Plm.buyer_id)
-    )
-    if buyer_id:
-        q = q.filter(Plm.buyer_id == buyer_id)
-    if supplier_id:
-        q = q.filter(Plm.supplier_id == supplier_id)
-    if date_from:
-        q = q.filter(FabricInspectionReport.inspection_date >= date_from)
-    if date_to:
-        q = q.filter(FabricInspectionReport.inspection_date <= date_to)
-    grouped = {}
-    for roll, plm, buyer in q.all():
-        row = grouped.setdefault(str(buyer.id), {"name": buyer.name, "total": 0, "passed": 0, "failed": 0})
-        row["total"] += 1
-        if roll.is_pass is True:
-            row["passed"] += 1
-        elif roll.is_pass is False:
-            row["failed"] += 1
-    out = []
-    for item in grouped.values():
-        total = item["total"]
-        item["pass_rate"] = round(item["passed"] / total * 100, 1) if total else None
-        out.append(item)
-    out.sort(key=lambda r: (r["pass_rate"] is None, -(r["pass_rate"] or 0), r["name"]))
-    return out
+    return _quality_rows(db, Buyer, Plm.buyer_id, buyer_id=buyer_id, supplier_id=supplier_id, date_from=date_from, date_to=date_to)
 
 
 def defect_rows(db: Session, *, group: str, buyer_id=None, supplier_id=None, date_from=None, date_to=None):
@@ -160,10 +140,24 @@ def quantity_rows(db: Session, *, group: str, buyer_id=None, supplier_id=None, d
         qty = rec.received_quantity if rec.received_quantity is not None else rec.fabric_length
         row["received"] += float(qty or 0)
 
-    q = db.query(Plm).options(
-        joinedload(Plm.buyer),
-        joinedload(Plm.supplier),
-        joinedload(Plm.colors).joinedload(PlmColor.rolls),
+    party = Supplier if group == "supplier" else Buyer
+    join_on = Plm.supplier_id if group == "supplier" else Plm.buyer_id
+    roll_counts = (
+        db.query(PlmColor.plm_id.label("plm_id"), func.count(PlmRoll.id).label("rolls"))
+        .join(PlmRoll, PlmRoll.plm_color_id == PlmColor.id)
+        .group_by(PlmColor.plm_id)
+        .subquery()
+    )
+    q = (
+        db.query(
+            party,
+            func.count(Plm.id),
+            func.coalesce(func.sum(Plm.allocated_quantity), 0),
+            func.coalesce(func.sum(roll_counts.c.rolls), 0),
+        )
+        .select_from(Plm)
+        .join(party, party.id == join_on)
+        .outerjoin(roll_counts, roll_counts.c.plm_id == Plm.id)
     )
     if buyer_id:
         q = q.filter(Plm.buyer_id == buyer_id)
@@ -173,13 +167,11 @@ def quantity_rows(db: Session, *, group: str, buyer_id=None, supplier_id=None, d
         q = q.filter(Plm.plm_date >= date_from)
     if date_to:
         q = q.filter(Plm.plm_date <= date_to)
-    for plm in q.all():
-        row = party_row(plm.supplier if group == "supplier" else plm.buyer)
-        if row is None:
-            continue
-        row["plms"] += 1
-        row["allocated"] += float(plm.allocated_quantity or 0)
-        row["rolls"] += sum(len(c.rolls) for c in (plm.colors or []))
+    for party_obj, plms, allocated, rolls in q.group_by(party.id).all():
+        row = party_row(party_obj)
+        row["plms"] += int(plms or 0)
+        row["allocated"] += float(allocated or 0)
+        row["rolls"] += int(rolls or 0)
     out = list(grouped.values())
     out.sort(key=lambda r: -(r["allocated"] or r["received"]))
     return out

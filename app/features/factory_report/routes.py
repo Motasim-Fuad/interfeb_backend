@@ -1,11 +1,12 @@
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
 from app.core.deps import require_roles
+from app.core.list_query import paginate
 from app.features.factory_report import models, schemas
 from app.features.plm.models import Plm
 from app.features.fabric_inspection import models as inspection_models
@@ -71,6 +72,10 @@ def _ensure_derived(db: Session, plm: Plm):
     return report
 
 
+def refresh_factory_report_for_plm(db: Session, plm: Plm):
+    return _ensure_derived(db, plm)
+
+
 @router.post("", response_model=schemas.FactoryReportOut)
 def create_or_update_report(
     payload: schemas.FactoryReportCreate,
@@ -90,7 +95,13 @@ def create_or_update_report(
 
 
 @router.get("", response_model=List[schemas.FactoryReportOut])
-def list_reports(plm_id: Optional[UUID] = None, db: Session = Depends(get_db)):
+def list_reports(
+    response: Response,
+    plm_id: Optional[UUID] = None,
+    limit: Optional[int] = None,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
     if plm_id:
         plm = db.query(Plm).get(plm_id)
         if not plm:
@@ -102,15 +113,9 @@ def list_reports(plm_id: Optional[UUID] = None, db: Session = Depends(get_db)):
         db.refresh(report)
         return [report]
 
-    # Refresh reports that have a 4-point source before returning global list.
-    for plm in db.query(Plm).all():
-        try:
-            _ensure_derived(db, plm)
-        except ValueError:
-            # PLMs with incomplete historical QC config should not break the list.
-            continue
-    db.commit()
-    return db.query(models.FactoryReport).order_by(models.FactoryReport.created_at.desc()).all()
+    # Stored rows are refreshed on every 4-point roll save, so the global list is read-only.
+    q = db.query(models.FactoryReport).order_by(models.FactoryReport.created_at.desc())
+    return paginate(q, response, limit, offset, default=50, maximum=200).all()
 
 
 @router.get("/{report_id}", response_model=schemas.FactoryReportOut)

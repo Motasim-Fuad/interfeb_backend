@@ -8,9 +8,11 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.deps import require_admin, CurrentUser
 from app.core.security import (
-    hash_secret, verify_secret, generate_access_code, create_token,
+    access_code_lookup, hash_secret, verify_secret, generate_access_code, create_token,
 )
 from app.core.config import settings
+from app.core.rate_limit import rate_limiter
+from app.features.audit.service import record_audit
 from app.features.auth import models, schemas
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
@@ -46,7 +48,7 @@ def register_admin(payload: schemas.AdminUserCreate, db: Session = Depends(get_d
     }
 
 
-@router.post("/admin/login", response_model=schemas.TokenResponse)
+@router.post("/admin/login", response_model=schemas.TokenResponse, dependencies=[Depends(rate_limiter("admin_login", 10, 60))])
 def admin_login(payload: schemas.AdminLoginRequest, db: Session = Depends(get_db)):
     admin = db.query(models.AdminUser).filter(models.AdminUser.email == payload.email).first()
     if not admin or not verify_secret(payload.password, admin.password_hash) or not admin.is_active:
@@ -70,6 +72,7 @@ def create_access_code(
     plain_code = generate_access_code(prefix=payload.role[:2].upper())
     row = models.AccessCode(
         code_hash=hash_secret(plain_code),
+        code_lookup=access_code_lookup(plain_code),
         role=payload.role,
         label=payload.label,
         expires_at=payload.expires_at,
@@ -83,12 +86,7 @@ def create_access_code(
 
 @router.get("/access-codes", response_model=List[schemas.AccessCodeOut])
 def list_access_codes(db: Session = Depends(get_db), admin: CurrentUser = Depends(require_admin())):
-    return (
-        db.query(models.AccessCode)
-        .filter(models.AccessCode.is_active == True)  # noqa: E712
-        .order_by(models.AccessCode.created_at.desc())
-        .all()
-    )
+    return db.query(models.AccessCode).order_by(models.AccessCode.created_at.desc()).all()
 
 
 @router.delete("/access-codes/{code_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -96,8 +94,31 @@ def delete_access_code(code_id: UUID, db: Session = Depends(get_db), admin: Curr
     row = db.query(models.AccessCode).filter(models.AccessCode.id == code_id).first()
     if not row:
         raise HTTPException(status_code=404, detail="Access code not found")
+    record_audit(db, admin, action="access_code_deleted", entity_type="access_code", entity_id=row.id,
+                 summary=f"{row.role} code '{row.label or '-'}' deleted")
     db.delete(row)
     db.commit()
+
+
+@router.patch("/access-codes/{code_id}/status", response_model=schemas.AccessCodeOut)
+def set_access_code_status(
+    code_id: UUID,
+    payload: schemas.AccessCodeStatusUpdate,
+    db: Session = Depends(get_db),
+    admin: CurrentUser = Depends(require_admin()),
+):
+    """Active codes can log in; blocked codes are refused at login and on every authenticated request."""
+    row = db.query(models.AccessCode).filter(models.AccessCode.id == code_id).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Access code not found")
+    if row.is_active != payload.is_active:
+        row.is_active = payload.is_active
+        record_audit(db, admin, action="access_code_activated" if payload.is_active else "access_code_blocked",
+                     entity_type="access_code", entity_id=row.id,
+                     summary=f"{row.role} code '{row.label or '-'}' {'activated' if payload.is_active else 'blocked'}")
+        db.commit()
+        db.refresh(row)
+    return row
 
 
 @router.patch("/access-codes/{code_id}/deactivate", response_model=schemas.AccessCodeOut)
@@ -112,19 +133,31 @@ def deactivate_access_code(code_id: UUID, db: Session = Depends(get_db), admin: 
     return row
 
 
-@router.post("/app/login", response_model=schemas.TokenResponse)
+@router.post("/app/login", response_model=schemas.TokenResponse, dependencies=[Depends(rate_limiter("app_login", 20, 60))])
 def app_login(payload: schemas.AppLoginRequest, db: Session = Depends(get_db)):
     """Flutter app calls this with the role-based code the admin generated."""
-    candidates = db.query(models.AccessCode).filter(models.AccessCode.is_active == True).all()  # noqa: E712
-
+    lookup = access_code_lookup(payload.code)
     matched = None
-    for c in candidates:
-        if verify_secret(payload.code, c.code_hash):
-            matched = c
-            break
+    row = db.query(models.AccessCode).filter(models.AccessCode.code_lookup == lookup).first()
+    if row and (verify_secret(payload.code.strip().upper(), row.code_hash) or verify_secret(payload.code, row.code_hash)):
+        matched = row
+    if matched is None:
+        # Codes created before code_lookup existed: scan once, then backfill the digest.
+        legacy = db.query(models.AccessCode).filter(
+            models.AccessCode.is_active == True,  # noqa: E712
+            models.AccessCode.code_lookup.is_(None),
+        ).all()
+        for c in legacy:
+            if verify_secret(payload.code, c.code_hash) or verify_secret(payload.code.strip().upper(), c.code_hash):
+                matched = c
+                matched.code_lookup = lookup
+                break
 
     if not matched:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or inactive code")
+
+    if not matched.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This access code is blocked. Contact the admin.")
 
     if matched.expires_at and matched.expires_at < datetime.utcnow():
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="This code has expired")

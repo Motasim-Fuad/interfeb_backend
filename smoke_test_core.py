@@ -38,7 +38,7 @@ if 'redis' not in sys.modules:
 
 from app.core.database import Base, engine, SessionLocal
 import app.models_registry  # noqa: F401
-from app.features.admin_config.models import Buyer, Supplier, DefectType, DefectRangeConfig, ShadeCheckPointDefinition
+from app.features.admin_config.models import Buyer, Supplier, DefectType, DefectRangeConfig, ShadeCheckPointDefinition, Material
 from app.features.admin_config import routes as admin_routes, schemas as admin_schemas
 from app.features.store import schemas as store_schemas, routes as store_routes
 from app.features.plm import schemas as plm_schemas, routes as plm_routes, models as plm_models
@@ -107,15 +107,18 @@ try:
     shade_length = db.query(ShadeCheckPointDefinition).filter_by(supplier_id=supplier.id, check_key='top_to_middle').one()
     shade_width = db.query(ShadeCheckPointDefinition).filter_by(supplier_id=supplier.id, check_key='width_4_to_1').one()
 
-    # Finalized receive cannot omit Dashboard-owned context/standards.
+    # Finalized receive cannot omit Dashboard-owned context/standards. Uses a supplier
+    # without a QC profile, since profile defaults would otherwise fill the standards.
+    bare_supplier = Supplier(name='No Profile Mill', default_measurement_unit='inch')
+    db.add(bare_supplier); db.commit(); db.refresh(bare_supplier)
     try:
         store_routes.create_fabric_receive(
             store_schemas.FabricReceiveCreate(
-                consignment='INCOMPLETE', buyer_id=buyer.id, supplier_id=supplier.id,
+                consignment='INCOMPLETE', buyer_id=buyer.id, supplier_id=bare_supplier.id,
                 received_quantity=100, fabric_type='Test', fabric_composition='Cotton',
                 measurement_unit='inch', qc_setup_status='finalized', qc_config={},
             ),
-            db=db, _=SimpleNamespace(role='store'),
+            db=db, user=SimpleNamespace(role='store'),
         )
         raise AssertionError('incomplete finalized QC setup should be rejected')
     except Exception as exc:
@@ -146,7 +149,7 @@ try:
             },
         ),
         db=db,
-        _=SimpleNamespace(role='store'),
+        user=SimpleNamespace(role='store'),
     )
     assert float(receive.received_quantity) == 1000
     assert receive.measurement_unit == 'inch'  # supplier default overrides payload
@@ -158,11 +161,15 @@ try:
     assert receive.qc_config['skew_bowing']['standard_point'] == 1.5
     assert [p['check_key'] for p in receive.qc_config['shade_check']['points']] == ['top_to_middle', 'width_4_to_1']
 
+    material = Material(fabric_name='Single Jersey', is_active=True)
+    db.add(material); db.commit(); db.refresh(material)
+
     plm = plm_routes.create_plm(
         plm_schemas.PlmCreate(
             plm_code='PLM-001',
             plm_date=date(2026, 8, 11),
             fabric_receive_id=receive.id,
+            material_id=material.id,
             plm_style='STYLE-A',
             allocated_quantity=600,
             colors=[plm_schemas.PlmColorIn(
@@ -171,7 +178,7 @@ try:
             )],
         ),
         db=db,
-        _=SimpleNamespace(is_admin=True),
+        user=SimpleNamespace(is_admin=True),
     )
     assert plm.buyer_id == buyer.id and plm.supplier_id == supplier.id
     assert plm.consignment == 'CONS-100' and plm.fabric_composition.startswith('95%')
@@ -184,7 +191,7 @@ try:
     revised_receive = store_routes.update_fabric_receive(
         receive.id,
         store_schemas.FabricReceiveUpdate(qc_config={'gsm': {'standard_gsm': 190}}),
-        db=db, _=SimpleNamespace(is_admin=True),
+        db=db, user=SimpleNamespace(is_admin=True),
     )
     assert revised_receive.qc_setup_version == 2
     assert revised_receive.qc_config['gsm']['standard_gsm'] == 190
@@ -194,14 +201,14 @@ try:
 
     plm2 = plm_routes.create_plm(
         plm_schemas.PlmCreate(
-            plm_code='PLM-002', plm_date=date(2026, 8, 11), fabric_receive_id=receive.id,
+            plm_code='PLM-002', plm_date=date(2026, 8, 11), fabric_receive_id=receive.id, material_id=material.id,
             plm_style='STYLE-B', allocated_quantity=300,
             colors=[plm_schemas.PlmColorIn(
                 colour_code='BLACK', planned_quantity=300,
                 rolls=[plm_schemas.PlmRollIn(roll_no='B1', marked_width=58, marked_length=100, planned_quantity=100, supplier_total_point=8)],
             )],
         ),
-        db=db, _=SimpleNamespace(is_admin=True),
+        db=db, user=SimpleNamespace(is_admin=True),
     )
     assert plm2.qc_config['gsm']['standard_gsm'] == 190
     assert plm2.qc_setup_version == 2
@@ -209,7 +216,7 @@ try:
     try:
         store_routes.update_fabric_receive(
             receive.id, store_schemas.FabricReceiveUpdate(consignment='CONS-CHANGED'),
-            db=db, _=SimpleNamespace(is_admin=True),
+            db=db, user=SimpleNamespace(is_admin=True),
         )
         raise AssertionError('consignment identity should lock after PLM creation')
     except Exception as exc:
@@ -244,7 +251,7 @@ try:
                 shade_schemas.ResultIn(point_definition_id=shade_width.id, first_ok=True, middle_ok=False, last_ok=True),
             ],
         ),
-        db=db, _=SimpleNamespace(role='inspection'),
+        response=None, db=db, _=SimpleNamespace(role='inspection'),
     )
     assert db.query(shade_models.ShadeCheckRoll).filter_by(report_id=shade_report.id, roll_no='1').count() == 1
     width_result = next(r for r in shade_saved.results if str(r.point_definition_id) == str(shade_width.id))
@@ -262,7 +269,7 @@ try:
         width_actual=58, length_actual=100,
         defects=[fi_schemas.DefectEntryIn(defect_type_id=defect.id, range_config_id=range4.id, count=2)],
     )
-    saved = fi_routes.upsert_roll(fi_report.id, fi_payload, db=db, _=SimpleNamespace(role='inspection'))
+    saved = fi_routes.upsert_roll(fi_report.id, fi_payload, response=None, db=db, user=SimpleNamespace(role='inspection'))
     assert saved.total_points == 8
     approx(saved.width_marked, 60)  # Dashboard planning wins over worker payload 999.
     approx(saved.length_marked, 120)
@@ -274,7 +281,7 @@ try:
         roll_no='1', width_actual=58, length_actual=100,
         defects=[fi_schemas.DefectEntryIn(defect_type_id=defect.id, range_config_id=range4.id, count=1)],
     )
-    saved2 = fi_routes.upsert_roll(fi_report.id, fi_payload2, db=db, _=SimpleNamespace(role='inspection'))
+    saved2 = fi_routes.upsert_roll(fi_report.id, fi_payload2, response=None, db=db, user=SimpleNamespace(role='inspection'))
     assert db.query(fi_models.FabricInspectionRoll).filter_by(report_id=fi_report.id, roll_no='1').count() == 1
     assert db.query(fi_models.FabricInspectionRollDefect).filter_by(roll_id=saved2.id).count() == 1
     assert saved2.total_points == 4
@@ -292,8 +299,9 @@ try:
             roll_no='2', width_actual=60, length_actual=120,
             defects=[fi_schemas.DefectEntryIn(defect_type_id=defect.id, range_config_id=range4.id, count=1)],
         ),
+        response=None,
         db=db,
-        _=SimpleNamespace(role='inspection'),
+        user=SimpleNamespace(role='inspection'),
     )
     refreshed = fi_routes.get_report(fi_report.id, db=db)
     expected_overall = 8 * 3600 / ((58 * 100) + (60 * 120))
@@ -308,8 +316,9 @@ try:
                 roll_no='3', width_actual=60, length_actual=120,
                 defects=[fi_schemas.DefectEntryIn(defect_type_id=defect.id, range_config_id=range4.id, count=1)],
             ),
+            response=None,
             db=db,
-            _=SimpleNamespace(role='inspection'),
+            user=SimpleNamespace(role='inspection'),
         )
         raise AssertionError('inactive defect should be rejected for new entry')
     except Exception as exc:
@@ -321,8 +330,8 @@ try:
     gsm_report = gsm_routes.create_report(gsm_schemas.ReportCreate(plm_id=plm.id), db=db, _=SimpleNamespace(role='inspection'))
     approx(gsm_report.standard_gsm, 180)
     approx(gsm_report.tolerance_snapshot, 5)
-    gsm_routes.upsert_roll(gsm_report.id, gsm_schemas.RollIn(roll_no='1', actual_gsm_before=180), db=db, _=SimpleNamespace(role='inspection'))
-    gsm_routes.upsert_roll(gsm_report.id, gsm_schemas.RollIn(roll_no='1', actual_gsm_before=200), db=db, _=SimpleNamespace(role='inspection'))
+    gsm_routes.upsert_roll(gsm_report.id, gsm_schemas.RollIn(roll_no='1', actual_gsm_before=180), response=None, db=db, _=SimpleNamespace(role='inspection'))
+    gsm_routes.upsert_roll(gsm_report.id, gsm_schemas.RollIn(roll_no='1', actual_gsm_before=200), response=None, db=db, _=SimpleNamespace(role='inspection'))
     assert db.query(gsm_models.GsmCheckRoll).filter_by(report_id=gsm_report.id, roll_no='1').count() == 1
     gsm_loaded = gsm_routes.get_report(gsm_report.id, db=db)
     approx(gsm_loaded.avg_over_less_before_pct, ((200-180)/180)*100)
@@ -335,7 +344,7 @@ try:
     skew_saved = skew_routes.upsert_roll(
         skew_report.id,
         skew_schemas.RollIn(roll_no='1', ac_value_before=102, bd_value_before=98),
-        db=db, _=SimpleNamespace(role='inspection'),
+        response=None, db=db, _=SimpleNamespace(role='inspection'),
     )
     approx(skew_saved.skew_percent_before, 2)
     # 60in stripe acceptance is 1.5in; |102-98| = 4in, so this roll fails even
@@ -344,7 +353,7 @@ try:
     assert db.query(skew_models.SkewBowingRoll).filter_by(report_id=skew_report.id, roll_no='1').count() == 1
 
     # Correlation is derived from Dashboard roll planning + 4-point factory results.
-    correlation = correlation_routes.list_reports(plm_id=plm.id, db=db)[0]
+    correlation = correlation_routes.list_reports(response=None, plm_id=plm.id, db=db)[0]
     corr_roll1 = next(r for r in correlation.rolls if r.roll_no == '1')
     approx(corr_roll1.length_yards, 120)
     approx(corr_roll1.width, 60)

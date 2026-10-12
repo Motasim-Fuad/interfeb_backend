@@ -108,6 +108,92 @@ class QuantityAggRow(BaseModel):
     rolls: int = 0
 
 
+class KpiSummary(BaseModel):
+    rolls_inspected: int = 0
+    passed: int = 0
+    failed: int = 0
+    pass_rate: Optional[float] = None
+    total_points: int = 0
+    points_per_100_sq_yd: Optional[float] = None
+    rolls_today: int = 0
+    accepted: int = 0
+    hold: int = 0
+    rejected: int = 0
+    claim: int = 0
+    pending_disposition: int = 0
+    schedules_pending: int = 0
+    schedules_in_progress: int = 0
+    schedules_today: int = 0
+
+
+class TrendPoint(BaseModel):
+    period: str
+    rolls: int = 0
+    passed: int = 0
+    failed: int = 0
+    pass_rate: Optional[float] = None
+    total_points: int = 0
+    points_per_100_sq_yd: Optional[float] = None
+
+
+class ParetoItem(BaseModel):
+    defect_type_id: UUID
+    defect_type_name: str
+    total_count: int = 0
+    total_points: int = 0
+    percent: float = 0
+    cumulative_percent: float = 0
+
+
+class ScorecardTrendPoint(BaseModel):
+    period: str
+    rolls: int = 0
+    pass_rate: Optional[float] = None
+
+
+class SupplierScorecardRow(BaseModel):
+    supplier_id: UUID
+    supplier_name: str
+    rolls: int = 0
+    passed: int = 0
+    failed: int = 0
+    pass_rate: Optional[float] = None
+    total_points: int = 0
+    points_per_100_sq_yd: Optional[float] = None
+    communication_rating: Optional[float] = None
+    score: Optional[float] = None
+    grade: Optional[str] = None
+    trend: list[ScorecardTrendPoint] = []
+
+
+class HeatmapCell(BaseModel):
+    supplier: str
+    defect_type: str
+    total_points: int = 0
+    total_count: int = 0
+
+
+class DefectHeatmap(BaseModel):
+    suppliers: list[str] = []
+    defect_types: list[str] = []
+    cells: list[HeatmapCell] = []
+
+
+class CorrelationPoint(BaseModel):
+    plm_id: UUID
+    plm_code: str
+    roll_no: str
+    supplier_name: str = ""
+    mill_points: float = 0
+    factory_points: int = 0
+    factory_percent_points: Optional[float] = None
+
+
+class DispositionCount(BaseModel):
+    disposition: str
+    count: int = 0
+
+
 class AnalysisOverview(BaseModel):
     supplier_quality: list[QualityAggRow] = []
     buyer_quality: list[QualityAggRow] = []

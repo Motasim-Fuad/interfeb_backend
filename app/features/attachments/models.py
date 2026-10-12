@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String
+from sqlalchemy import Column, Index, String
 from sqlalchemy.dialects.postgresql import UUID
 
 from app.core.base_model import UUIDMixin, TimestampMixin
@@ -12,6 +12,7 @@ class Attachment(Base, UUIDMixin, TimestampMixin):
     File bytes never touch Postgres - only the storage key/url, resolved via app/core/storage.py.
     """
     __tablename__ = "attachments"
+    __table_args__ = (Index("ix_attachments_owner_lookup", "owner_type", "owner_id", "created_at"),)
 
     owner_type = Column(String, nullable=False, index=True)
     owner_id = Column(UUID(as_uuid=True), nullable=False, index=True)

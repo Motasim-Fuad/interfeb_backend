@@ -3,12 +3,14 @@ from datetime import date
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session, joinedload
+from fastapi import APIRouter, Depends, HTTPException, Response
+from sqlalchemy import func
+from sqlalchemy.orm import Session, joinedload, noload, selectinload
 
 from app.core.database import get_db
-from app.core.deps import require_roles, require_admin
-from app.core.list_query import apply_page, apply_text_search, apply_year_month
+from app.core.deps import CurrentUser, require_roles, require_admin
+from app.core.list_query import apply_text_search, apply_year_month, paginate
+from app.features.audit.service import record_audit, stamp_creator
 from app.features.plm import models, schemas
 from app.features.store.models import FabricReceive
 from app.features.admin_config.models import Material
@@ -22,23 +24,24 @@ from app.features.admin_config.service import (
 router = APIRouter(prefix="/plms", tags=["PLM"])
 
 
-def _plm_query(db: Session):
+def _plm_query(db: Session, *, lite: bool = False):
+    colors = noload(models.Plm.colors) if lite else selectinload(models.Plm.colors).selectinload(models.PlmColor.rolls)
     return db.query(models.Plm).options(
         joinedload(models.Plm.fabric_receive),
         joinedload(models.Plm.buyer),
         joinedload(models.Plm.supplier),
         joinedload(models.Plm.material),
-        joinedload(models.Plm.colors).joinedload(models.PlmColor.rolls),
+        colors,
     )
 
 
 def _validate_allocation(db: Session, receive: FabricReceive, quantity: Optional[float], exclude_plm_id=None):
     if quantity is None or receive.received_quantity is None:
         return
-    q = db.query(models.Plm).filter(models.Plm.fabric_receive_id == receive.id)
+    q = db.query(func.coalesce(func.sum(models.Plm.allocated_quantity), 0)).filter(models.Plm.fabric_receive_id == receive.id)
     if exclude_plm_id:
         q = q.filter(models.Plm.id != exclude_plm_id)
-    used = sum(float(p.allocated_quantity or 0) for p in q.all())
+    used = float(q.scalar() or 0)
     if used + float(quantity) > float(receive.received_quantity) + 1e-9:
         raise HTTPException(
             status_code=422,
@@ -112,8 +115,11 @@ def _require_roll_fields(roll: schemas.PlmRollIn) -> None:
 
 
 def _sync_color_quantity(db: Session, color: models.PlmColor) -> None:
-    rows = db.query(models.PlmRoll).filter(models.PlmRoll.plm_color_id == color.id).all()
-    total = sum(float(r.planned_quantity or 0) for r in rows)
+    total = float(
+        db.query(func.coalesce(func.sum(models.PlmRoll.planned_quantity), 0))
+        .filter(models.PlmRoll.plm_color_id == color.id)
+        .scalar() or 0
+    )
     if color.planned_quantity is None:
         if total > 0:
             color.planned_quantity = total
@@ -127,7 +133,7 @@ def _validate_color_roll_totals(db: Session, color: models.PlmColor) -> None:
 
 
 @router.post("", response_model=schemas.PlmOut)
-def create_plm(payload: schemas.PlmCreate, db: Session = Depends(get_db), _=Depends(require_admin())):
+def create_plm(payload: schemas.PlmCreate, db: Session = Depends(get_db), user: CurrentUser = Depends(require_admin())):
     if db.query(models.Plm).filter(models.Plm.plm_code == payload.plm_code).first():
         raise HTTPException(status_code=400, detail="A PLM with this code already exists")
 
@@ -167,8 +173,11 @@ def create_plm(payload: schemas.PlmCreate, db: Session = Depends(get_db), _=Depe
         qc_setup_version=receive.qc_setup_version or 1,
         material_snapshot=snapshot,
     )
+    stamp_creator(plm, user)
     db.add(plm)
     db.flush()
+    record_audit(db, user, action="plm_created", entity_type="plm", entity_id=plm.id, plm_id=plm.id,
+                 summary=f"PLM {plm.plm_code} created ({payload.allocated_quantity or 0:g} {plm.quantity_unit})")
 
     seen_colors = set()
     for color_in in payload.colors:
@@ -196,14 +205,18 @@ def create_plm(payload: schemas.PlmCreate, db: Session = Depends(get_db), _=Depe
 
 
 @router.put("/{plm_id}", response_model=schemas.PlmOut)
-def update_plm(plm_id: UUID, payload: schemas.PlmUpdate, db: Session = Depends(get_db), _=Depends(require_admin())):
+def update_plm(plm_id: UUID, payload: schemas.PlmUpdate, db: Session = Depends(get_db), user: CurrentUser = Depends(require_admin())):
     plm = _plm_query(db).get(plm_id)
     if not plm:
         raise HTTPException(status_code=404, detail="PLM not found")
     if payload.allocated_quantity is not None and plm.fabric_receive:
         _validate_allocation(db, plm.fabric_receive, payload.allocated_quantity, exclude_plm_id=plm.id)
-    for k, v in payload.model_dump(exclude_none=True).items():
+    changes = payload.model_dump(exclude_none=True)
+    for k, v in changes.items():
         setattr(plm, k, v)
+    record_audit(db, user, action="plm_updated", entity_type="plm", entity_id=plm.id, plm_id=plm.id,
+                 summary=f"PLM {plm.plm_code} updated: {', '.join(changes) or 'no changes'}",
+                 data={k: str(v) for k, v in changes.items()})
     db.commit()
     return _plm_query(db).get(plm.id)
 
@@ -315,7 +328,7 @@ def bulk_add_rolls(color_id: UUID, payload: schemas.PlmRollBulkCreate, db: Sessi
 
 
 @router.patch("/rolls/{roll_id}", response_model=schemas.PlmRollOut)
-def update_roll(roll_id: UUID, payload: schemas.PlmRollUpdate, db: Session = Depends(get_db), _=Depends(require_roles("inspection"))):
+def update_roll(roll_id: UUID, payload: schemas.PlmRollUpdate, db: Session = Depends(get_db), user: CurrentUser = Depends(require_roles("inspection"))):
     roll = db.query(models.PlmRoll).get(roll_id)
     if not roll:
         raise HTTPException(status_code=404, detail="Roll not found")
@@ -331,6 +344,10 @@ def update_roll(roll_id: UUID, payload: schemas.PlmRollUpdate, db: Session = Dep
     color = db.query(models.PlmColor).get(roll.plm_color_id)
     if color:
         _validate_color_roll_totals(db, color)
+    record_audit(db, user, action="planned_roll_updated", entity_type="plm_roll", entity_id=roll.id,
+                 plm_id=color.plm_id if color else None,
+                 summary=f"Planned roll {roll.roll_no} updated: {', '.join(updates) or 'no changes'}",
+                 data={k: str(v) for k, v in updates.items()})
     db.commit()
     db.refresh(roll)
     return roll
@@ -338,6 +355,7 @@ def update_roll(roll_id: UUID, payload: schemas.PlmRollUpdate, db: Session = Dep
 
 @router.get("", response_model=List[schemas.PlmOut])
 def list_plms(
+    response: Response,
     buyer_id: Optional[UUID] = None,
     supplier_id: Optional[UUID] = None,
     fabric_receive_id: Optional[UUID] = None,
@@ -349,9 +367,10 @@ def list_plms(
     date_to: Optional[date] = None,
     limit: Optional[int] = None,
     offset: int = 0,
+    lite: bool = False,
     db: Session = Depends(get_db),
 ):
-    qset = _plm_query(db)
+    qset = db.query(models.Plm)
     if buyer_id:
         qset = qset.filter(models.Plm.buyer_id == buyer_id)
     if supplier_id:
@@ -366,60 +385,107 @@ def list_plms(
         qset = qset.filter(models.Plm.plm_date >= date_from)
     if date_to:
         qset = qset.filter(models.Plm.plm_date <= date_to)
-    qset = qset.order_by(models.Plm.created_at.desc())
-    qset = apply_page(qset, limit=limit, offset=offset)
-    return [apply_live_material(plm) for plm in qset.all()]
+    count_query = qset
+    page = paginate(qset.order_by(models.Plm.created_at.desc()), response, limit, offset, count_query=count_query)
+    ids = [row.id for row in page.with_entities(models.Plm.id).all()]
+    if not ids:
+        return []
+    loaded = {plm.id: plm for plm in _plm_query(db, lite=lite).filter(models.Plm.id.in_(ids)).all()}
+    return [apply_live_material(loaded[i]) for i in ids if i in loaded]
+
+
+def _schedule_query(db: Session):
+    return db.query(models.InspectionSchedule).options(
+        joinedload(models.InspectionSchedule.plm).joinedload(models.Plm.buyer),
+        joinedload(models.InspectionSchedule.plm).joinedload(models.Plm.supplier),
+    )
 
 
 # Keep static /schedules routes ABOVE /{plm_id} so route matching is unambiguous.
 @router.post("/schedules", response_model=schemas.InspectionScheduleOut)
-def create_schedule(payload: schemas.InspectionScheduleIn, db: Session = Depends(get_db), _=Depends(require_roles("inspection"))):
-    if not db.query(models.Plm).get(payload.plm_id):
+def create_schedule(payload: schemas.InspectionScheduleIn, db: Session = Depends(get_db), user: CurrentUser = Depends(require_roles("inspection"))):
+    plm = db.query(models.Plm).get(payload.plm_id)
+    if not plm:
         raise HTTPException(status_code=404, detail="PLM not found")
     row = models.InspectionSchedule(**payload.model_dump())
+    stamp_creator(row, user)
     db.add(row)
+    db.flush()
+    record_audit(db, user, action="schedule_created", entity_type="inspection_schedule", entity_id=row.id, plm_id=plm.id,
+                 summary=f"Schedule for {plm.plm_code} on {payload.scheduled_date.isoformat()}")
     db.commit()
-    db.refresh(row)
-    return row
+    return _schedule_query(db).get(row.id)
 
 
 @router.get("/schedules/list", response_model=List[schemas.InspectionScheduleOut])
-def list_schedules(status: Optional[str] = None, db: Session = Depends(get_db)):
-    q = db.query(models.InspectionSchedule)
+def list_schedules(
+    response: Response,
+    status: Optional[str] = None,
+    plm_id: Optional[UUID] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    q: Optional[str] = None,
+    limit: Optional[int] = None,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
+    query = _schedule_query(db)
     if status:
-        q = q.filter(models.InspectionSchedule.status == status)
-    return q.order_by(models.InspectionSchedule.scheduled_date).all()
+        query = query.filter(models.InspectionSchedule.status.in_([s.strip() for s in status.split(",") if s.strip()]))
+    if plm_id:
+        query = query.filter(models.InspectionSchedule.plm_id == plm_id)
+    if date_from:
+        query = query.filter(models.InspectionSchedule.scheduled_date >= date_from)
+    if date_to:
+        query = query.filter(models.InspectionSchedule.scheduled_date <= date_to)
+    if q and q.strip():
+        query = query.join(models.Plm, models.Plm.id == models.InspectionSchedule.plm_id).filter(
+            models.Plm.plm_code.ilike(f"%{q.strip()}%")
+        )
+    query = query.order_by(models.InspectionSchedule.scheduled_date, models.InspectionSchedule.created_at)
+    return paginate(query, response, limit, offset, default=2000, maximum=2000).all()
 
 
 @router.delete("/schedules/{schedule_id}", status_code=204)
-def delete_schedule(schedule_id: UUID, db: Session = Depends(get_db), _=Depends(require_roles("inspection"))):
-    row = db.query(models.InspectionSchedule).get(schedule_id)
+def delete_schedule(schedule_id: UUID, db: Session = Depends(get_db), user: CurrentUser = Depends(require_roles("inspection"))):
+    row = _schedule_query(db).get(schedule_id)
     if not row:
         raise HTTPException(status_code=404, detail="Schedule not found")
+    record_audit(db, user, action="schedule_deleted", entity_type="inspection_schedule", entity_id=row.id, plm_id=row.plm_id,
+                 summary=f"Schedule for {row.plm_code} on {row.scheduled_date.isoformat()} deleted")
     db.delete(row)
     db.commit()
 
 
 @router.patch("/schedules/{schedule_id}/status", response_model=schemas.InspectionScheduleOut)
-def update_schedule_status(schedule_id: UUID, payload: schemas.ScheduleStatusUpdate, db: Session = Depends(get_db), _=Depends(require_roles("inspection"))):
-    row = db.query(models.InspectionSchedule).get(schedule_id)
+def update_schedule_status(schedule_id: UUID, payload: schemas.ScheduleStatusUpdate, db: Session = Depends(get_db), user: CurrentUser = Depends(require_roles("inspection", "worker"))):
+    row = _schedule_query(db).get(schedule_id)
     if not row:
         raise HTTPException(status_code=404, detail="Schedule not found")
     if payload.status not in ("pending", "in_progress", "completed"):
         raise HTTPException(status_code=422, detail="status must be pending, in_progress, or completed")
+    if not user.is_admin and user.role == "worker" and payload.status != "in_progress":
+        raise HTTPException(status_code=403, detail="Workers can only start a schedule")
+    before = row.status
     row.status = payload.status
+    if before != payload.status:
+        record_audit(db, user, action="schedule_status", entity_type="inspection_schedule", entity_id=row.id, plm_id=row.plm_id,
+                     summary=f"Schedule {row.plm_code}: {before} -> {payload.status}")
     db.commit()
     db.refresh(row)
     return row
 
 
 @router.patch("/schedules/{schedule_id}/reschedule", response_model=schemas.InspectionScheduleOut)
-def reschedule(schedule_id: UUID, payload: schemas.ScheduleRescheduleUpdate, db: Session = Depends(get_db), _=Depends(require_roles("inspection"))):
-    row = db.query(models.InspectionSchedule).get(schedule_id)
+def reschedule(schedule_id: UUID, payload: schemas.ScheduleRescheduleUpdate, db: Session = Depends(get_db), user: CurrentUser = Depends(require_roles("inspection"))):
+    row = _schedule_query(db).get(schedule_id)
     if not row:
         raise HTTPException(status_code=404, detail="Schedule not found")
+    before = row.scheduled_date
     row.scheduled_date = payload.scheduled_date
     row.status = "pending"
+    record_audit(db, user, action="schedule_rescheduled", entity_type="inspection_schedule", entity_id=row.id, plm_id=row.plm_id,
+                 summary=f"Schedule {row.plm_code}: {before.isoformat()} -> {payload.scheduled_date.isoformat()}")
     db.commit()
     db.refresh(row)
     return row

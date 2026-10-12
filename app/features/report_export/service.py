@@ -726,6 +726,31 @@ def _fabric_inspection(db, plm):
         story += [_p('Additional Defect Breakdown', LABEL), _table(extra, widths=[18*mm] + [extra_width] * len(extra_defect_names), header_rows=1, font=5.4), Spacer(1, 3*mm)]
     result = 'PASS' if stats['is_pass'] else 'FAIL' if stats['is_pass'] is False else ''
     story += [_table([['Total Defect Points', stats['total_defect_points'], 'Overall % Points', _fmt(stats['overall_percent_points']), 'Result', result]], widths=[36*mm, 28*mm, 36*mm, 28*mm, 24*mm, 28*mm], header_rows=0, font=7.5)]
+
+    decided = [r for r in report.rolls if (r.disposition or 'pending') != 'pending' or r.shade_band]
+    if decided:
+        decision_rows = [['Roll No', 'Decision', 'Shade Band', 'Note', 'Inspector']]
+        for r in decided:
+            decision_rows.append([r.roll_no, (r.disposition or 'pending').upper(), r.shade_band or '', r.disposition_note or '', r.inspector_name or ''])
+        story += [Spacer(1, 3*mm), _p('Roll Decisions', LABEL),
+                  _table(decision_rows, widths=[22*mm, 26*mm, 22*mm, pagew - 130*mm, 60*mm], header_rows=1, font=6.5)]
+
+    located = [
+        (r, d) for r in report.rolls for d in r.defects
+        if d.position_yard is not None or d.side
+    ]
+    if located:
+        located.sort(key=lambda rd: (rd[0].roll_no, float(rd[1].position_yard) if rd[1].position_yard is not None else 1e9))
+        loc_rows = [['Roll No', 'Position', 'Side', 'Defect', 'Size', 'Points', 'Photo']]
+        for r, d in located[:400]:
+            loc_rows.append([
+                r.roll_no, _fmt(d.position_yard), (d.side or '').title(), d.defect_type_name or '',
+                d.range_label or '', d.points_snapshot, 'Yes' if d.photo_url else '',
+            ])
+        story += [Spacer(1, 3*mm), _p(f'Defect Location Log ({report.quantity_unit_snapshot})', LABEL),
+                  _table(loc_rows, widths=[22*mm, 20*mm, 18*mm, pagew - 150*mm, 40*mm, 18*mm, 32*mm], header_rows=1, font=6.2)]
+        if len(located) > 400:
+            story += [_p(f'{len(located) - 400} more located defects not shown.', LABEL)]
     return story, True
 
 

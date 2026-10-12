@@ -1,11 +1,12 @@
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
 from app.core.deps import require_roles
+from app.core.list_query import paginate
 from app.features.plm.models import Plm, PlmColor, PlmRoll
 from app.features.correlation import models, schemas, service
 from app.features.fabric_inspection import models as inspection_models
@@ -116,6 +117,15 @@ def _sync_from_sources(db: Session, report: models.FabricCorrelationReport, plm:
         row.roll_date = source.report.inspection_date if source and source.report else None
 
         # Mirror the factory 4-point defect snapshots so correlation history stays readable.
+        # Rows are only rewritten when the source changed, so repeated GETs don't churn the table.
+        def _sig(defects):
+            return sorted(
+                (str(d.defect_type_id), str(d.range_config_id), int(d.count or 0), int(d.points_snapshot or 0))
+                for d in defects
+            )
+
+        if _sig(row.defects) == _sig(source.defects if source else []):
+            continue
         for old in list(row.defects):
             db.delete(old)
         db.flush()
@@ -139,6 +149,12 @@ def _sync_from_sources(db: Session, report: models.FabricCorrelationReport, plm:
     db.flush()
 
 
+def refresh_correlation_for_plm(db: Session, plm: Plm) -> models.FabricCorrelationReport:
+    report = _ensure_report(db, plm)
+    _sync_from_sources(db, report, plm)
+    return report
+
+
 @router.post("", response_model=schemas.ReportOut)
 def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
     plm = db.query(Plm).get(payload.plm_id)
@@ -151,18 +167,25 @@ def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), 
 
 
 @router.get("", response_model=List[schemas.ReportOut])
-def list_reports(plm_id: Optional[UUID] = None, db: Session = Depends(get_db)):
+def list_reports(
+    response: Response,
+    plm_id: Optional[UUID] = None,
+    limit: Optional[int] = None,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
     # A PLM-specific correlation view is derived on demand; no separate worker entry screen.
     if plm_id:
         plm = db.query(Plm).get(plm_id)
         if not plm:
             return []
-        report = _ensure_report(db, plm)
-        _sync_from_sources(db, report, plm)
+        report = refresh_correlation_for_plm(db, plm)
         db.commit()
         return [_attach(_query(db).get(report.id))]
 
-    return [_attach(r) for r in _query(db).order_by(models.FabricCorrelationReport.created_at.desc()).all()]
+    # Global list returns stored rows; they are refreshed whenever a 4-point roll is saved.
+    q = _query(db).order_by(models.FabricCorrelationReport.created_at.desc())
+    return [_attach(r) for r in paginate(q, response, limit, offset, default=50, maximum=200).all()]
 
 
 @router.get("/{report_id}", response_model=schemas.ReportOut)

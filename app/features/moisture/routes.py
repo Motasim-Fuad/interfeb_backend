@@ -1,10 +1,12 @@
 from datetime import date
 from typing import List, Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
+from app.core.sync import as_utc_naive, is_stale, mark_stale
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
+from app.core.list_query import bound_unscoped
 from app.core.deps import require_roles
 from app.features.moisture import models, schemas, service
 from app.features.inspection_report.service import upsert_inspection_report
@@ -66,10 +68,10 @@ def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), 
 
 
 @router.get("", response_model=List[schemas.ReportOut])
-def list_reports(plm_id: Optional[UUID] = None, db: Session = Depends(get_db)):
+def list_reports(response: Response, plm_id: Optional[UUID] = None, limit: Optional[int] = None, offset: int = 0, db: Session = Depends(get_db)):
     q = db.query(models.MoistureCheckReport).options(joinedload(models.MoistureCheckReport.rolls))
     if plm_id: q = q.filter(models.MoistureCheckReport.plm_id == plm_id)
-    return [_hydrate(db, r) for r in q.order_by(models.MoistureCheckReport.created_at.desc()).all()]
+    return [_hydrate(db, r) for r in bound_unscoped(q.order_by(models.MoistureCheckReport.created_at.desc()), bool(plm_id), response, limit, offset).all()]
 
 
 @router.get("/{report_id}", response_model=schemas.ReportOut)
@@ -80,11 +82,15 @@ def get_report(report_id: UUID, db: Session = Depends(get_db)):
 
 
 @router.post("/{report_id}/rolls", response_model=schemas.RollOut)
-def upsert_roll(report_id: UUID, payload: schemas.RollIn, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
+def upsert_roll(report_id: UUID, payload: schemas.RollIn, response: Response, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
     report = db.query(models.MoistureCheckReport).get(report_id)
     if not report: raise HTTPException(status_code=404, detail="Report not found")
     roll = db.query(models.MoistureCheckRoll).filter(models.MoistureCheckRoll.report_id == report_id, models.MoistureCheckRoll.roll_no == payload.roll_no).first()
+    if is_stale(roll, payload.client_updated_at):
+        mark_stale(response)
+        return roll
     data = payload.model_dump()
+    data["client_updated_at"] = as_utc_naive(payload.client_updated_at)
     # Composition is planning data from the PLM/consignment, never re-entered by worker.
     plm = db.query(Plm).get(report.plm_id)
     data['fabric_composition'] = plm.fabric_composition if plm else data.get('fabric_composition')

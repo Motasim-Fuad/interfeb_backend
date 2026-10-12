@@ -38,6 +38,10 @@ class AccessCodeCreated(BaseModel):
     plain_code: str
 
 
+class AccessCodeStatusUpdate(BaseModel):
+    is_active: bool
+
+
 class AccessCodeOut(BaseModel):
     id: UUID
     role: str

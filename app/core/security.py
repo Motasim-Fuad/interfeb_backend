@@ -1,3 +1,4 @@
+import hashlib
 import secrets
 from datetime import datetime, timedelta
 from typing import Optional
@@ -17,6 +18,10 @@ def hash_secret(raw: str) -> str:
 
 def verify_secret(raw: str, hashed: str) -> bool:
     return pwd_context.verify(raw, hashed)
+
+
+def access_code_lookup(raw: str) -> str:
+    return hashlib.sha256(raw.strip().upper().encode()).hexdigest()
 
 
 def generate_access_code(prefix: str = "IF") -> str:

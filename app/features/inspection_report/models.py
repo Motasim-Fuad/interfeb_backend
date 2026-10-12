@@ -29,4 +29,4 @@ class InspectionReport(Base, UUIDMixin, TimestampMixin):
     color_continuity_card_id = Column(UUID(as_uuid=True), ForeignKey("color_continuity_rolls.id"), nullable=True)
     fabric_inspection_roll_id = Column(UUID(as_uuid=True), ForeignKey("fabric_inspection_rolls.id"), nullable=True)
 
-    submitted_at = Column(DateTime, nullable=True)
+    submitted_at = Column(DateTime, nullable=True, index=True)

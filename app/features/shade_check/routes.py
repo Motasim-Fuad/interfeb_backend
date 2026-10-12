@@ -1,10 +1,12 @@
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
+from app.core.sync import as_utc_naive, is_stale, mark_stale
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
+from app.core.list_query import bound_unscoped
 from app.core.deps import require_roles
 from app.features.shade_check import models, schemas
 from app.features.inspection_report.service import upsert_inspection_report
@@ -77,7 +79,7 @@ def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), 
 
 
 @router.get("", response_model=List[schemas.ReportOut])
-def list_reports(plm_id: Optional[UUID] = None, db: Session = Depends(get_db)):
+def list_reports(response: Response, plm_id: Optional[UUID] = None, limit: Optional[int] = None, offset: int = 0, db: Session = Depends(get_db)):
     q = db.query(models.ShadeCheckReport).options(
         joinedload(models.ShadeCheckReport.rolls)
         .joinedload(models.ShadeCheckRoll.results)
@@ -85,7 +87,7 @@ def list_reports(plm_id: Optional[UUID] = None, db: Session = Depends(get_db)):
     )
     if plm_id:
         q = q.filter(models.ShadeCheckReport.plm_id == plm_id)
-    reports = q.order_by(models.ShadeCheckReport.created_at.desc()).all()
+    reports = bound_unscoped(q.order_by(models.ShadeCheckReport.created_at.desc()), bool(plm_id), response, limit, offset).all()
     for report in reports:
         _hydrate(db, report)
     return reports
@@ -116,7 +118,7 @@ def update_report(report_id: UUID, payload: schemas.ReportUpdate, db: Session = 
 
 
 @router.post("/{report_id}/rolls", response_model=schemas.RollOut)
-def upsert_roll(report_id: UUID, payload: schemas.RollIn, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
+def upsert_roll(report_id: UUID, payload: schemas.RollIn, response: Response, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
     report = db.query(models.ShadeCheckReport).get(report_id)
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
@@ -132,7 +134,11 @@ def upsert_roll(report_id: UUID, payload: schemas.RollIn, db: Session = Depends(
         models.ShadeCheckRoll.report_id == report_id,
         models.ShadeCheckRoll.roll_no == payload.roll_no,
     ).first()
+    if is_stale(roll, payload.client_updated_at):
+        mark_stale(response)
+        return _photos(db, roll)
     data = payload.model_dump(exclude={"results"})
+    data["client_updated_at"] = as_utc_naive(payload.client_updated_at)
     if roll:
         for key, value in data.items():
             setattr(roll, key, value)

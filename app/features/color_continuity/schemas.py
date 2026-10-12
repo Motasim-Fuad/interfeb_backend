@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import List, Optional
 from uuid import UUID
 from pydantic import BaseModel
@@ -6,6 +6,7 @@ from pydantic import BaseModel
 
 class RollIn(BaseModel):
     roll_no: str
+    client_updated_at: Optional[datetime] = None
     shade_group_before: Optional[str] = None
     shade_group_after: Optional[str] = None
     yardage: Optional[float] = None

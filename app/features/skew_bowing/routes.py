@@ -1,10 +1,12 @@
 from datetime import date
 from typing import List, Optional
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
+from app.core.sync import as_utc_naive, is_stale, mark_stale
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
+from app.core.list_query import bound_unscoped
 from app.core.deps import require_roles
 from app.features.skew_bowing import models, schemas, service
 from app.features.inspection_report.service import upsert_inspection_report
@@ -60,10 +62,10 @@ def create_report(payload:schemas.ReportCreate,db:Session=Depends(get_db),_=Depe
     db.add(report);db.commit();db.refresh(report);return _attach(db,report)
 
 @router.get("",response_model=List[schemas.ReportOut])
-def list_reports(plm_id:Optional[UUID]=None,db:Session=Depends(get_db)):
+def list_reports(response: Response, plm_id: Optional[UUID] = None, limit: Optional[int] = None, offset: int = 0, db: Session = Depends(get_db)):
     q=db.query(models.SkewBowingReport).options(joinedload(models.SkewBowingReport.rolls))
     if plm_id:q=q.filter(models.SkewBowingReport.plm_id==plm_id)
-    return [_attach(db,r) for r in q.order_by(models.SkewBowingReport.created_at.desc()).all()]
+    return [_attach(db,r) for r in bound_unscoped(q.order_by(models.SkewBowingReport.created_at.desc()),bool(plm_id),response,limit,offset).all()]
 
 @router.get("/{report_id}",response_model=schemas.ReportOut)
 def get_report(report_id:UUID,db:Session=Depends(get_db)):
@@ -72,23 +74,27 @@ def get_report(report_id:UUID,db:Session=Depends(get_db)):
     return _attach(db,r)
 
 @router.post("/{report_id}/rolls",response_model=schemas.RollOut)
-def upsert_roll(report_id:UUID,payload:schemas.RollIn,db:Session=Depends(get_db),_=Depends(require_roles("inspection","worker"))):
+def upsert_roll(report_id:UUID,payload:schemas.RollIn,response:Response,db:Session=Depends(get_db),_=Depends(require_roles("inspection","worker"))):
     report=db.query(models.SkewBowingReport).get(report_id)
     if not report:raise HTTPException(status_code=404,detail="Report not found")
     plm=db.query(Plm).get(report.plm_id)
     if not plm:raise HTTPException(status_code=404,detail="PLM not found")
     data=payload.model_dump()
+    data["client_updated_at"]=as_utc_naive(payload.client_updated_at)
     # Percentage is derived only from AC/BD; no hidden reference length is needed.
     data["reference_fabric_length"]=None
     roll=db.query(models.SkewBowingRoll).filter(models.SkewBowingRoll.report_id==report_id,models.SkewBowingRoll.roll_no==payload.roll_no).first()
-    require_before_wash_first(roll, data, ("ac_value_before","bd_value_before"), ("ac_value_after","bd_value_after"))
-    stamp_wash_dates(roll, data, ("ac_value_before","bd_value_before"), ("ac_value_after","bd_value_after"))
-    if roll:
-        merge_roll_fields(roll, data)
+    if is_stale(roll,payload.client_updated_at):
+        mark_stale(response)
     else:
-        roll=models.SkewBowingRoll(report_id=report_id,**{k:v for k,v in data.items() if v is not None or k=="roll_no"});db.add(roll)
-    db.commit();db.refresh(roll)
-    upsert_inspection_report(db,plm_id=report.plm_id,roll_number=roll.roll_no,color_name=roll.colour_code,module_field="skew_report_id",module_row_id=roll.id);db.commit()
+        require_before_wash_first(roll, data, ("ac_value_before","bd_value_before"), ("ac_value_after","bd_value_after"))
+        stamp_wash_dates(roll, data, ("ac_value_before","bd_value_before"), ("ac_value_after","bd_value_after"))
+        if roll:
+            merge_roll_fields(roll, data)
+        else:
+            roll=models.SkewBowingRoll(report_id=report_id,**{k:v for k,v in data.items() if v is not None or k=="roll_no"});db.add(roll)
+        db.commit();db.refresh(roll)
+        upsert_inspection_report(db,plm_id=report.plm_id,roll_number=roll.roll_no,color_name=roll.colour_code,module_field="skew_report_id",module_row_id=roll.id);db.commit()
     roll.attachments=get_attachments(db,"skew_bowing_roll",roll.id)
     std=float(report.standard_point_snapshot) if report.standard_point_snapshot is not None else None
     for k,v in service.compute_roll_fields(roll,std,report.measurement_unit_snapshot).items():setattr(roll,k,v)

@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import List, Optional
 from uuid import UUID
 from pydantic import BaseModel
@@ -8,6 +8,7 @@ from app.features.attachments.schemas import AttachmentOut
 
 class RollIn(BaseModel):
     roll_no: str
+    client_updated_at: Optional[datetime] = None
     color_code: Optional[str] = None
     fabric_yds_mtr: Optional[float] = None
     roll_date: Optional[date] = None

@@ -25,6 +25,8 @@ class AccessCode(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "access_codes"
 
     code_hash = Column(String, nullable=False)          # bcrypt hash of the plain code
+    # sha256 of the normalised code: lets login find the row without bcrypt-checking every code.
+    code_lookup = Column(String, nullable=True, unique=True, index=True)
     role = Column(AccessCodeRoleEnum, nullable=False, index=True)  # 'worker' | 'inspection' | 'store'
     label = Column(String, nullable=False)              # e.g. "Floor A Worker Code"
     is_active = Column(Boolean, default=True, nullable=False)

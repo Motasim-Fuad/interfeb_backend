@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Numeric, Date, ForeignKey, JSON, Integer
+from sqlalchemy import Column, String, Numeric, Date, ForeignKey, Index, JSON, Integer
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -17,6 +17,12 @@ class FabricReceive(Base, BaseEntity):
     when inspection starts so historical results do not change if this setup is edited later.
     """
     __tablename__ = "fabric_receives"
+    __table_args__ = (
+        Index("ix_fabric_receives_supplier_id", "supplier_id"),
+        Index("ix_fabric_receives_buyer_id", "buyer_id"),
+        Index("ix_fabric_receives_received_at", "received_at"),
+        Index("ix_fabric_receives_created_at", "created_at"),
+    )
 
     consignment = Column(String, nullable=False, index=True)
     supplier_id = Column(UUID(as_uuid=True), ForeignKey("suppliers.id"), nullable=True)

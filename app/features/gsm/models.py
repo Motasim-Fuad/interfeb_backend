@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Numeric, Date, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, String, Numeric, Date, ForeignKey, UniqueConstraint, DateTime
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -24,6 +24,8 @@ class GsmCheckReport(Base, BaseEntity):
 class GsmCheckRoll(Base, BaseEntity):
     __tablename__ = "gsm_check_rolls"
     __table_args__ = (UniqueConstraint("report_id", "roll_no", name="uq_gsm_report_roll"),)
+    # Phone-side save time; newer offline copies win (app/core/sync.py).
+    client_updated_at = Column(DateTime, nullable=True)
 
     report_id = Column(UUID(as_uuid=True), ForeignKey("gsm_check_reports.id"), nullable=False, index=True)
     roll_no = Column(String, nullable=False)

@@ -1,13 +1,20 @@
-from datetime import date
-from typing import List, Optional
+from datetime import date, datetime
+from typing import List, Literal, Optional
 from uuid import UUID
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+Disposition = Literal["pending", "accepted", "hold", "rejected", "claim"]
+DefectSide = Literal["left", "center", "right"]
 
 
 class DefectEntryIn(BaseModel):
     defect_type_id: UUID
     range_config_id: UUID
     count: int
+    position_yard: Optional[float] = Field(default=None, ge=0)
+    side: Optional[DefectSide] = None
+    photo_url: Optional[str] = None
+    recorded_at: Optional[datetime] = None
 
 
 class DefectEntryOut(DefectEntryIn):
@@ -27,6 +34,9 @@ class RollIn(BaseModel):
     length_actual: Optional[float] = None
     remarks: Optional[str] = None
     defects: List[DefectEntryIn] = []
+    inspector_name: Optional[str] = None
+    inspected_at: Optional[datetime] = None
+    client_updated_at: Optional[datetime] = None
 
 
 class RollOut(BaseModel):
@@ -41,8 +51,55 @@ class RollOut(BaseModel):
     total_points: int
     percent_points: Optional[float] = None
     is_pass: Optional[bool] = None
+    disposition: str = "pending"
+    disposition_note: Optional[str] = None
+    shade_band: Optional[str] = None
+    inspector_name: Optional[str] = None
+    inspected_at: Optional[datetime] = None
+    client_updated_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
     defects: List[DefectEntryOut] = []
     class Config: from_attributes = True
+
+
+class DispositionUpdate(BaseModel):
+    disposition: Disposition
+    disposition_note: Optional[str] = None
+    shade_band: Optional[str] = Field(default=None, max_length=20)
+
+
+class RollListItem(BaseModel):
+    id: UUID
+    report_id: UUID
+    plm_id: UUID
+    plm_code: str
+    supplier_id: Optional[UUID] = None
+    supplier_name: Optional[str] = None
+    buyer_id: Optional[UUID] = None
+    buyer_name: Optional[str] = None
+    roll_no: str
+    colour_code: Optional[str] = None
+    total_points: int = 0
+    percent_points: Optional[float] = None
+    is_pass: Optional[bool] = None
+    disposition: str = "pending"
+    disposition_note: Optional[str] = None
+    shade_band: Optional[str] = None
+    inspector_name: Optional[str] = None
+    inspected_at: Optional[datetime] = None
+
+
+class PreviewIn(BaseModel):
+    plm_id: UUID
+    width_actual: Optional[float] = None
+    length_actual: Optional[float] = None
+    total_points: int = Field(default=0, ge=0)
+
+
+class PreviewOut(BaseModel):
+    percent_points: Optional[float] = None
+    is_pass: Optional[bool] = None
+    individual_standard: Optional[float] = None
 
 
 class ReportCreate(BaseModel):

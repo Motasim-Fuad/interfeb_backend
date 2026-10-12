@@ -1,10 +1,12 @@
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
+from app.core.sync import as_utc_naive, is_stale, mark_stale
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
+from app.core.list_query import bound_unscoped
 from app.core.deps import require_roles
 from app.features.color_continuity import models, schemas
 from app.features.inspection_report.service import upsert_inspection_report
@@ -32,18 +34,18 @@ def create_card(payload: schemas.CardCreate, db: Session = Depends(get_db), _=De
 
 
 @router.get("", response_model=List[schemas.CardOut])
-def list_cards(plm_id: Optional[UUID] = None, db: Session = Depends(get_db)):
+def list_cards(response: Response, plm_id: Optional[UUID] = None, limit: Optional[int] = None, offset: int = 0, db: Session = Depends(get_db)):
     q = db.query(models.ColorContinuityCard).options(joinedload(models.ColorContinuityCard.rolls))
     if plm_id:
         q = q.filter(models.ColorContinuityCard.plm_id == plm_id)
-    cards = q.order_by(models.ColorContinuityCard.created_at.desc()).all()
+    cards = bound_unscoped(q.order_by(models.ColorContinuityCard.created_at.desc()), bool(plm_id), response, limit, offset).all()
     for card in cards:
         _attach_totals(card)
     return cards
 
 
 @router.post("/{card_id}/rolls", response_model=schemas.RollOut)
-def upsert_roll(card_id: UUID, payload: schemas.RollIn, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
+def upsert_roll(card_id: UUID, payload: schemas.RollIn, response: Response, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
     card = db.query(models.ColorContinuityCard).get(card_id)
     if not card:
         raise HTTPException(status_code=404, detail="Card not found")
@@ -53,11 +55,16 @@ def upsert_roll(card_id: UUID, payload: schemas.RollIn, db: Session = Depends(ge
         .filter(models.ColorContinuityRoll.card_id == card_id, models.ColorContinuityRoll.roll_no == payload.roll_no)
         .first()
     )
+    if is_stale(roll, payload.client_updated_at):
+        mark_stale(response)
+        return roll
+    data = payload.model_dump()
+    data["client_updated_at"] = as_utc_naive(payload.client_updated_at)
     if roll:
-        for k, v in payload.model_dump().items():
+        for k, v in data.items():
             setattr(roll, k, v)
     else:
-        roll = models.ColorContinuityRoll(card_id=card_id, **payload.model_dump())
+        roll = models.ColorContinuityRoll(card_id=card_id, **data)
         db.add(roll)
 
     db.commit()

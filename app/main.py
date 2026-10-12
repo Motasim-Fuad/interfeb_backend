@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 import os
 
 from app.core.config import settings
@@ -25,6 +26,9 @@ from app.features.factory_report.routes import router as factory_report_router
 from app.features.inspection_report.routes import router as inspection_report_router
 from app.features.analytics.routes import router as analytics_router
 from app.features.report_export.routes import router as report_export_router
+from app.features.audit.routes import router as audit_router
+from app.core.list_query import TOTAL_COUNT_HEADER
+from app.features.fabric_inspection.routes import SYNC_STALE_HEADER
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -41,7 +45,9 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=[TOTAL_COUNT_HEADER, SYNC_STALE_HEADER, "Content-Disposition"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 # Serves locally-stored images at /media/... (only relevant while STORAGE_BACKEND=local)
 os.makedirs(settings.MEDIA_ROOT, exist_ok=True)
@@ -66,6 +72,7 @@ app.include_router(factory_report_router)
 app.include_router(inspection_report_router)
 app.include_router(analytics_router)
 app.include_router(report_export_router)
+app.include_router(audit_router)
 
 
 @app.get("/health", tags=["Health"])

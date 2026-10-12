@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import List, Optional
 from uuid import UUID
 from pydantic import BaseModel
@@ -23,6 +23,7 @@ class MeasurementOut(MeasurementIn):
 
 class RollIn(BaseModel):
     roll_no: str
+    client_updated_at: Optional[datetime] = None
     yds: Optional[float] = None
     pattern: Optional[str] = None
     shade: Optional[str] = None

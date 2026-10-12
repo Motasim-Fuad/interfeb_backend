@@ -2,7 +2,9 @@ from typing import Iterable, Optional
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from sqlalchemy.orm import Session
 
+from app.core.database import get_db
 from app.core.security import decode_token
 
 bearer_scheme = HTTPBearer(auto_error=False)
@@ -16,8 +18,29 @@ class CurrentUser:
         self.is_admin = is_admin
 
 
+ACCESS_CODE_BLOCKED = "access_code_blocked"
+ACCESS_CODE_REMOVED = "access_code_removed"
+
+
+def _ensure_access_code_usable(db: Session, code_id: Optional[str]) -> None:
+    """App tokens die with their access code: block/delete on the dashboard takes effect immediately."""
+    from uuid import UUID
+
+    from app.features.auth.models import AccessCode
+
+    try:
+        row = db.get(AccessCode, UUID(str(code_id)))
+    except (TypeError, ValueError):
+        row = None
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ACCESS_CODE_REMOVED)
+    if not row.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ACCESS_CODE_BLOCKED)
+
+
 def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
 ) -> CurrentUser:
     if credentials is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
@@ -25,6 +48,9 @@ def get_current_user(
     payload = decode_token(credentials.credentials)
     if payload is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+
+    if not payload.get("is_admin", False):
+        _ensure_access_code_usable(db, payload.get("sub"))
 
     return CurrentUser(
         sub=payload.get("sub"),

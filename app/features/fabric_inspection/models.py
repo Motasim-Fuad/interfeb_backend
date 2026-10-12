@@ -1,9 +1,12 @@
-from sqlalchemy import Column, String, Numeric, Integer, Date, Boolean, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, String, Numeric, Integer, Date, DateTime, Boolean, ForeignKey, Index, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
 from app.core.base_model import BaseEntity
 from app.core.database import Base
+
+DISPOSITIONS = ("pending", "accepted", "hold", "rejected", "claim")
+DEFECT_SIDES = ("left", "center", "right")
 
 
 class FabricInspectionReport(Base, BaseEntity):
@@ -22,7 +25,7 @@ class FabricInspectionReport(Base, BaseEntity):
     average_standard_snapshot = Column(Numeric, nullable=True)
 
     fabric_in_house_date = Column(Date, nullable=True)
-    inspection_date = Column(Date, nullable=True)
+    inspection_date = Column(Date, nullable=True, index=True)
     consignment = Column(String, nullable=True)
     comments = Column(String, nullable=True)
     measurement_unit_snapshot = Column(String, nullable=False, default="inch")
@@ -35,7 +38,11 @@ class FabricInspectionReport(Base, BaseEntity):
 
 class FabricInspectionRoll(Base, BaseEntity):
     __tablename__ = "fabric_inspection_rolls"
-    __table_args__ = (UniqueConstraint("report_id", "roll_no", name="uq_fabric_inspection_report_roll"),)
+    __table_args__ = (
+        UniqueConstraint("report_id", "roll_no", name="uq_fabric_inspection_report_roll"),
+        Index("ix_fabric_inspection_rolls_created_at", "created_at"),
+        Index("ix_fabric_inspection_rolls_is_pass", "is_pass"),
+    )
 
     report_id = Column(UUID(as_uuid=True), ForeignKey("fabric_inspection_reports.id"), nullable=False, index=True)
     roll_no = Column(String, nullable=False)
@@ -51,6 +58,15 @@ class FabricInspectionRoll(Base, BaseEntity):
     percent_points = Column(Numeric, nullable=True)
     is_pass = Column(Boolean, nullable=True)  # None = not yet evaluated
 
+    # QC decision on the physical roll, separate from the computed pass/fail.
+    disposition = Column(String, nullable=False, default="pending", server_default="pending", index=True)
+    disposition_note = Column(String, nullable=True)
+    shade_band = Column(String, nullable=True)
+    inspector_name = Column(String, nullable=True)
+    inspected_at = Column(DateTime, nullable=True, index=True)
+    # Device time of the save that produced this state; older offline replays are ignored.
+    client_updated_at = Column(DateTime, nullable=True)
+
     report = relationship("FabricInspectionReport", back_populates="rolls")
     defects = relationship("FabricInspectionRollDefect", back_populates="roll", cascade="all, delete-orphan")
 
@@ -59,12 +75,17 @@ class FabricInspectionRollDefect(Base, BaseEntity):
     __tablename__ = "fabric_inspection_roll_defects"
 
     roll_id = Column(UUID(as_uuid=True), ForeignKey("fabric_inspection_rolls.id"), nullable=False, index=True)
-    defect_type_id = Column(UUID(as_uuid=True), ForeignKey("defect_types.id"), nullable=False)
+    defect_type_id = Column(UUID(as_uuid=True), ForeignKey("defect_types.id"), nullable=False, index=True)
     range_config_id = Column(UUID(as_uuid=True), ForeignKey("defect_range_configs.id"), nullable=False)
     count = Column(Integer, nullable=False, default=0)
     points_snapshot = Column(Integer, nullable=False, default=0)
     defect_type_name_snapshot = Column(String, nullable=True)
     range_label_snapshot = Column(String, nullable=True)
+    # Optional per-defect location/evidence; legacy aggregated rows leave these empty.
+    position_yard = Column(Numeric, nullable=True)
+    side = Column(String, nullable=True)
+    photo_url = Column(String, nullable=True)
+    recorded_at = Column(DateTime, nullable=True)
 
     roll = relationship("FabricInspectionRoll", back_populates="defects")
     defect_type = relationship("DefectType")

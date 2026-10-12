@@ -27,6 +27,25 @@ def length_to_yards(length: float, quantity_unit: str) -> float:
     raise ValueError("Unsupported quantity unit; configure consignment as yds or meter")
 
 
+def score_roll(
+    total_points: int,
+    width_actual,
+    length_actual,
+    individual_standard: float | None,
+    measurement_unit: str = "inch",
+    quantity_unit: str = "yds",
+) -> tuple[float | None, bool | None]:
+    percent_points = None
+    if width_actual and length_actual and float(width_actual) > 0 and float(length_actual) > 0:
+        width_inches = width_to_inches(float(width_actual), measurement_unit)
+        length_yards = length_to_yards(float(length_actual), quantity_unit)
+        percent_points = (total_points * FOUR_POINT_CONSTANT) / float(width_inches * length_yards)
+    is_pass = None
+    if percent_points is not None and individual_standard is not None:
+        is_pass = float(percent_points) <= float(individual_standard)
+    return percent_points, is_pass
+
+
 def recalculate_roll(
     db: Session,
     roll: models.FabricInspectionRoll,
@@ -36,18 +55,9 @@ def recalculate_roll(
 ):
     total_points = sum(d.points_snapshot for d in roll.defects)
     roll.total_points = total_points
-
-    if roll.width_actual and roll.length_actual and roll.width_actual > 0 and roll.length_actual > 0:
-        width_inches = width_to_inches(float(roll.width_actual), measurement_unit)
-        length_yards = length_to_yards(float(roll.length_actual), quantity_unit)
-        roll.percent_points = (total_points * FOUR_POINT_CONSTANT) / float(width_inches * length_yards)
-    else:
-        roll.percent_points = None
-
-    if roll.percent_points is not None and individual_standard is not None:
-        roll.is_pass = float(roll.percent_points) <= float(individual_standard)
-    else:
-        roll.is_pass = None
+    roll.percent_points, roll.is_pass = score_roll(
+        total_points, roll.width_actual, roll.length_actual, individual_standard, measurement_unit, quantity_unit,
+    )
 
 
 def compute_report_stats(report: models.FabricInspectionReport) -> dict:
@@ -91,14 +101,19 @@ def compute_report_stats(report: models.FabricInspectionReport) -> dict:
     }
 
 
-def resolve_defect_snapshot(db: Session, defect_type_id, range_config_id, count: int) -> dict:
+def resolve_defect_snapshot(db: Session, defect_type_id, range_config_id, count: int, lookup: dict | None = None) -> dict:
     """Validate a dashboard-managed defect/range and freeze its human-readable meaning.
 
     IDs keep referential integrity. Snapshots keep historical reports stable if an admin
-    later renames/deactivates a defect or range.
+    later renames/deactivates a defect or range. Pass `lookup` (from load_defect_lookup)
+    to avoid two queries per defect line.
     """
-    defect_type = db.query(config_models.DefectType).get(defect_type_id)
-    range_config = db.query(config_models.DefectRangeConfig).get(range_config_id)
+    if lookup is not None:
+        defect_type = lookup["types"].get(defect_type_id)
+        range_config = lookup["ranges"].get(range_config_id)
+    else:
+        defect_type = db.query(config_models.DefectType).get(defect_type_id)
+        range_config = db.query(config_models.DefectRangeConfig).get(range_config_id)
     if not defect_type or not defect_type.is_active:
         raise ValueError("Invalid or inactive defect_type_id")
     if not range_config or not range_config.is_active:
@@ -112,6 +127,14 @@ def resolve_defect_snapshot(db: Session, defect_type_id, range_config_id, count:
         "defect_type_name": defect_type.name,
         "range_label": range_config.range_label,
     }
+
+
+def load_defect_lookup(db: Session, defect_type_ids, range_config_ids) -> dict:
+    type_ids = set(defect_type_ids)
+    range_ids = set(range_config_ids)
+    types = db.query(config_models.DefectType).filter(config_models.DefectType.id.in_(type_ids)).all() if type_ids else []
+    ranges = db.query(config_models.DefectRangeConfig).filter(config_models.DefectRangeConfig.id.in_(range_ids)).all() if range_ids else []
+    return {"types": {t.id: t for t in types}, "ranges": {r.id: r for r in ranges}}
 
 
 def add_defect_snapshot(db: Session, defect_type_id, range_config_id, count: int) -> int:

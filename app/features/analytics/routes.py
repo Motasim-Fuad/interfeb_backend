@@ -6,7 +6,7 @@ Drill-down hierarchy: Supplier -> PLM -> Defect type/roll, matching the reportin
 agreed on - "which supplier has the most defects, which of their PLMs, which defects
 within that PLM."
 """
-from datetime import date
+from datetime import date, datetime, time
 from typing import List, Optional
 from uuid import UUID
 
@@ -14,9 +14,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
+from app.core.cache import cached, invalidate_prefix, make_key
 from app.core.database import get_db
 from app.core.deps import require_admin
-from app.core.list_query import apply_page
+from app.core.list_query import apply_page, clamp_limit
+from app.features.analytics import insights
 from app.features.admin_config.models import Buyer, DefectType, Supplier
 from app.features.analytics.models import SupplierMonthlyInput
 from app.features.fabric_inspection.models import FabricInspectionRoll, FabricInspectionRollDefect, FabricInspectionReport
@@ -137,19 +139,17 @@ def defect_ranking(
 def pass_fail_summary(
     plm_id: Optional[UUID] = None,
     supplier_id: Optional[UUID] = None,
+    buyer_id: Optional[UUID] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
     db: Session = Depends(get_db),
 ):
     """Fabric Inspection pass/fail rate - same pattern extends to any other module's rolls."""
-    q = db.query(FabricInspectionRoll).join(FabricInspectionReport).join(Plm, Plm.id == FabricInspectionReport.plm_id)
-    if plm_id:
-        q = q.filter(FabricInspectionReport.plm_id == plm_id)
-    if supplier_id:
-        q = q.filter(Plm.supplier_id == supplier_id)
-
-    rolls = q.all()
-    total = len(rolls)
-    passed = sum(1 for r in rolls if r.is_pass is True)
-    failed = sum(1 for r in rolls if r.is_pass is False)
+    total, passed, failed = insights._scope(
+        insights._roll_query(db, func.count(FabricInspectionRoll.id), insights.PASSED, insights.FAILED),
+        plm_id=plm_id, supplier_id=supplier_id, buyer_id=buyer_id, date_from=date_from, date_to=date_to,
+    ).one()
+    total, passed, failed = int(total or 0), int(passed or 0), int(failed or 0)
 
     return {
         "module": "fabric_inspection",
@@ -213,13 +213,13 @@ def inspection_rolls(
     if year and not date_from:
         date_from, date_to = month_bounds(year, month)
     if date_from:
-        q = q.filter(func.date(InspectionReport.submitted_at) >= date_from)
+        q = q.filter(InspectionReport.submitted_at >= datetime.combine(date_from, time.min))
     if date_to:
-        q = q.filter(func.date(InspectionReport.submitted_at) <= date_to)
+        q = q.filter(InspectionReport.submitted_at <= datetime.combine(date_to, time.max))
 
     q = q.order_by(InspectionReport.submitted_at.desc(), Plm.plm_code, InspectionReport.roll_number)
-    total_matching = q.count()
-    q = apply_page(q, limit=limit, offset=offset)
+    total_matching = q.order_by(None).count()
+    q = apply_page(q, limit=clamp_limit(limit, default=100, maximum=1000), offset=offset)
     records = q.all()
     plm_ids = {plm.id for _, plm, _, _, _ in records}
     factory_plm_ids = set()
@@ -288,6 +288,107 @@ def analysis_overview(
     }
 
 
+INSIGHT_TTL_SECONDS = 60
+
+
+def _filters(buyer_id, supplier_id, date_from, date_to) -> dict:
+    return {"buyer_id": buyer_id, "supplier_id": supplier_id, "date_from": date_from, "date_to": date_to}
+
+
+@router.get("/kpis", response_model=schemas.KpiSummary)
+def kpi_summary(
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    buyer_id: Optional[UUID] = None,
+    supplier_id: Optional[UUID] = None,
+    db: Session = Depends(get_db),
+):
+    f = _filters(buyer_id, supplier_id, date_from, date_to)
+    return cached(make_key("analytics", kind="kpis", today=date.today(), **f), INSIGHT_TTL_SECONDS, lambda: insights.kpis(db, **f))
+
+
+@router.get("/trend", response_model=List[schemas.TrendPoint])
+def quality_trend(
+    granularity: Optional[str] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    buyer_id: Optional[UUID] = None,
+    supplier_id: Optional[UUID] = None,
+    db: Session = Depends(get_db),
+):
+    f = _filters(buyer_id, supplier_id, date_from, date_to)
+    g = granularity or insights.default_trend_granularity(date_from, date_to)
+    return cached(make_key("analytics", kind="trend", g=g, **f), INSIGHT_TTL_SECONDS, lambda: insights.trend(db, g, **f))
+
+
+@router.get("/defect-pareto", response_model=List[schemas.ParetoItem])
+def defect_pareto(
+    plm_id: Optional[UUID] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    buyer_id: Optional[UUID] = None,
+    supplier_id: Optional[UUID] = None,
+    db: Session = Depends(get_db),
+):
+    f = {**_filters(buyer_id, supplier_id, date_from, date_to), "plm_id": plm_id}
+    return cached(make_key("analytics", kind="pareto", **f), INSIGHT_TTL_SECONDS, lambda: insights.defect_pareto(db, **f))
+
+
+@router.get("/supplier-scorecard", response_model=List[schemas.SupplierScorecardRow])
+def supplier_scorecard(
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    buyer_id: Optional[UUID] = None,
+    supplier_id: Optional[UUID] = None,
+    db: Session = Depends(get_db),
+):
+    f = _filters(buyer_id, supplier_id, date_from, date_to)
+    return cached(make_key("analytics", kind="scorecard", today=date.today(), **f), INSIGHT_TTL_SECONDS, lambda: insights.supplier_scorecard(db, **f))
+
+
+@router.get("/defect-heatmap", response_model=schemas.DefectHeatmap)
+def defect_heatmap(
+    max_suppliers: int = 10,
+    max_defects: int = 10,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    buyer_id: Optional[UUID] = None,
+    supplier_id: Optional[UUID] = None,
+    db: Session = Depends(get_db),
+):
+    f = _filters(buyer_id, supplier_id, date_from, date_to)
+    return cached(
+        make_key("analytics", kind="heatmap", ms=max_suppliers, md=max_defects, **f),
+        INSIGHT_TTL_SECONDS,
+        lambda: insights.defect_heatmap(db, max_suppliers, max_defects, **f),
+    )
+
+
+@router.get("/correlation-scatter", response_model=List[schemas.CorrelationPoint])
+def correlation_scatter(
+    limit: int = 1000,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    buyer_id: Optional[UUID] = None,
+    supplier_id: Optional[UUID] = None,
+    db: Session = Depends(get_db),
+):
+    f = _filters(buyer_id, supplier_id, date_from, date_to)
+    return cached(make_key("analytics", kind="correlation", limit=limit, **f), INSIGHT_TTL_SECONDS, lambda: insights.correlation_scatter(db, limit, **f))
+
+
+@router.get("/disposition-summary", response_model=List[schemas.DispositionCount])
+def disposition_summary(
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    buyer_id: Optional[UUID] = None,
+    supplier_id: Optional[UUID] = None,
+    db: Session = Depends(get_db),
+):
+    f = _filters(buyer_id, supplier_id, date_from, date_to)
+    return cached(make_key("analytics", kind="disposition", **f), INSIGHT_TTL_SECONDS, lambda: insights.disposition_summary(db, **f))
+
+
 @router.get("/supplier-monthly-inputs", response_model=List[schemas.SupplierMonthlyInputOut])
 def list_monthly_inputs(year: int, month: int, db: Session = Depends(get_db)):
     rows = (
@@ -331,6 +432,7 @@ def upsert_monthly_input(payload: schemas.SupplierMonthlyInputIn, db: Session = 
         row.communication_rating = payload.communication_rating
         row.notes = payload.notes
     db.commit()
+    invalidate_prefix("analytics")
     db.refresh(row)
     supplier = db.query(Supplier).get(row.supplier_id)
     return schemas.SupplierMonthlyInputOut(

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Date, Enum, ForeignKey, Numeric, UniqueConstraint, JSON, Integer
+from sqlalchemy import Column, String, Date, Enum, ForeignKey, Index, Numeric, UniqueConstraint, JSON, Integer
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -10,6 +10,14 @@ from app.core.shared_enums import MeasurementUnitEnum
 class Plm(Base, BaseEntity):
     """Production order under one received fabric consignment."""
     __tablename__ = "plms"
+    __table_args__ = (
+        Index("ix_plms_supplier_id", "supplier_id"),
+        Index("ix_plms_buyer_id", "buyer_id"),
+        Index("ix_plms_fabric_receive_id", "fabric_receive_id"),
+        Index("ix_plms_material_id", "material_id"),
+        Index("ix_plms_plm_date", "plm_date"),
+        Index("ix_plms_created_at", "created_at"),
+    )
 
     plm_code = Column(String, unique=True, nullable=False, index=True)
     plm_date = Column(Date, nullable=False)
@@ -69,7 +77,10 @@ class PlmColor(Base, BaseEntity):
 
 class PlmRoll(Base, BaseEntity):
     __tablename__ = "plm_rolls"
-    __table_args__ = (UniqueConstraint("plm_color_id", "roll_no", name="uq_plm_color_roll_no"),)
+    __table_args__ = (
+        UniqueConstraint("plm_color_id", "roll_no", name="uq_plm_color_roll_no"),
+        Index("ix_plm_rolls_roll_no", "roll_no"),
+    )
 
     plm_color_id = Column(UUID(as_uuid=True), ForeignKey("plm_colors.id"), nullable=False, index=True)
     roll_no = Column(String, nullable=False)
@@ -85,6 +96,10 @@ class PlmRoll(Base, BaseEntity):
 
 class InspectionSchedule(Base, BaseEntity):
     __tablename__ = "inspection_schedules"
+    __table_args__ = (
+        Index("ix_inspection_schedules_status", "status"),
+        Index("ix_inspection_schedules_scheduled_date", "scheduled_date"),
+    )
 
     plm_id = Column(UUID(as_uuid=True), ForeignKey("plms.id"), nullable=False, index=True)
     scheduled_date = Column(Date, nullable=False)

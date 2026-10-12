@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Numeric, Date, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, String, Numeric, Date, ForeignKey, UniqueConstraint, DateTime
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -19,6 +19,8 @@ class ColorContinuityCard(Base, BaseEntity):
 class ColorContinuityRoll(Base, BaseEntity):
     __tablename__ = "color_continuity_rolls"
     __table_args__ = (UniqueConstraint("card_id", "roll_no", name="uq_continuity_card_roll"),)
+    # Phone-side save time; newer offline copies win (app/core/sync.py).
+    client_updated_at = Column(DateTime, nullable=True)
 
     card_id = Column(UUID(as_uuid=True), ForeignKey("color_continuity_cards.id"), nullable=False, index=True)
     roll_no = Column(String, nullable=False)

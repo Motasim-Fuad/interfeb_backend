@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 from pydantic import BaseModel
@@ -23,6 +23,7 @@ class ResultOut(ResultIn):
 
 class RollIn(BaseModel):
     roll_no: str
+    client_updated_at: Optional[datetime] = None
     colour: Optional[str] = None
     cons: Optional[float] = None
     roll_date: Optional[date] = None

@@ -1,12 +1,13 @@
 from typing import List, Optional
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.core.deps import require_admin
-from app.core.list_query import apply_page, apply_text_search, apply_year_month
+from app.core.deps import CurrentUser, require_admin
+from app.core.list_query import apply_text_search, apply_year_month, paginate
+from app.features.audit.service import record_audit, stamp_creator
 from app.features.store import models, schemas
 from app.features.admin_config.models import Supplier
 from app.features.admin_config.service import get_supplier_qc_config, deep_merge
@@ -148,7 +149,7 @@ def _normalize_payload(
 def create_fabric_receive(
     payload: schemas.FabricReceiveCreate,
     db: Session = Depends(get_db),
-    _=Depends(require_admin()),
+    user: CurrentUser = Depends(require_admin()),
 ):
     duplicate = db.query(models.FabricReceive).filter(models.FabricReceive.consignment == payload.consignment).first()
     if duplicate:
@@ -156,7 +157,11 @@ def create_fabric_receive(
     data = _normalize_payload(db, payload)
     _validate_finalized_setup(data)
     row = models.FabricReceive(**data)
+    stamp_creator(row, user)
     db.add(row)
+    db.flush()
+    record_audit(db, user, action="fabric_receive_created", entity_type="fabric_receive", entity_id=row.id,
+                 summary=f"Consignment {row.consignment} received ({row.qc_setup_status or 'draft'})")
     db.commit()
     db.refresh(row)
     return row
@@ -167,7 +172,7 @@ def update_fabric_receive(
     receive_id: UUID,
     payload: schemas.FabricReceiveUpdate,
     db: Session = Depends(get_db),
-    _=Depends(require_admin()),
+    user: CurrentUser = Depends(require_admin()),
 ):
     row = db.query(models.FabricReceive).get(receive_id)
     if not row:
@@ -199,8 +204,13 @@ def update_fabric_receive(
     setup_changed = any(key in _QC_VERSION_FIELDS and _changed(row, key, value) for key, value in data.items())
     if setup_changed:
         row.qc_setup_version = (row.qc_setup_version or 1) + 1
+    changed_keys = sorted(key for key, value in data.items() if _changed(row, key, value))
     for key, value in data.items():
         setattr(row, key, value)
+    if changed_keys:
+        record_audit(db, user, action="fabric_receive_updated", entity_type="fabric_receive", entity_id=row.id,
+                     summary=f"Consignment {row.consignment} updated (v{row.qc_setup_version or 1}, {row.qc_setup_status}): "
+                             + ", ".join(changed_keys))
     db.commit()
     db.refresh(row)
     return row
@@ -208,6 +218,7 @@ def update_fabric_receive(
 
 @router.get("", response_model=List[schemas.FabricReceiveOut])
 def list_fabric_receives(
+    response: Response,
     consignment: Optional[str] = None,
     buyer_id: Optional[UUID] = None,
     supplier_id: Optional[UUID] = None,
@@ -228,8 +239,7 @@ def list_fabric_receives(
     query = apply_text_search(query, models.FabricReceive, q, ("consignment", "fabric_type", "fabric_composition", "notes"))
     query = apply_year_month(query, models.FabricReceive.received_at, year, month)
     query = query.order_by(models.FabricReceive.created_at.desc())
-    query = apply_page(query, limit=limit, offset=offset)
-    return query.all()
+    return paginate(query, response, limit, offset).all()
 
 
 @router.get("/{receive_id}", response_model=schemas.FabricReceiveOut)
