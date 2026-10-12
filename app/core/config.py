@@ -41,6 +41,17 @@ class Settings(BaseSettings):
     AWS_REGION: str = "ap-south-1"
     AWS_S3_BUCKET: str = ""
 
+    # FabriQ assistant. Free offline engine by default; point these at any OpenAI-compatible
+    # endpoint (OpenAI, Groq, Gemini, Ollama, LM Studio) to let an LLM plan the tool calls.
+    ASSISTANT_NAME: str = "FabriQ"
+    ASSISTANT_LLM_BASE_URL: str = ""
+    ASSISTANT_LLM_API_KEY: str = ""
+    ASSISTANT_LLM_MODEL: str = ""
+    ASSISTANT_LLM_TIMEOUT_SECONDS: float = 25.0
+    # "hash" = built-in offline embedder; "openai" = ASSISTANT_EMBED_MODEL on the same endpoint.
+    ASSISTANT_EMBEDDER: str = "hash"
+    ASSISTANT_EMBED_MODEL: str = "text-embedding-3-small"
+
     class Config:
         env_file = ".env"
         case_sensitive = True

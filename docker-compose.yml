@@ -1,6 +1,7 @@
 services:
   db:
-    image: postgres:16
+    # postgres:16 + the pgvector extension (FabriQ assistant vector store); same data format as postgres:16.
+    image: pgvector/pgvector:pg16-trixie
     container_name: interfab-db
     restart: unless-stopped
     environment:
