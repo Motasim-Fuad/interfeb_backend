@@ -105,7 +105,7 @@ def upsert_roll(report_id: UUID, payload: schemas.RollIn, response: Response, db
         for m in payload.measurements:
             db.add(models.ShrinkageMeasurement(roll_id=roll.id, **m.model_dump()))
 
-        db.commit()
+        db.flush()
         db.refresh(roll)
 
         upsert_inspection_report(

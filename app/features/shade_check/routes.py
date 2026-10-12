@@ -10,7 +10,7 @@ from app.core.list_query import bound_unscoped
 from app.core.deps import require_roles
 from app.features.shade_check import models, schemas
 from app.features.inspection_report.service import upsert_inspection_report
-from app.features.attachments.service import get_attachments, attach_stage_photos
+from app.features.attachments.service import attach_photos_bulk, attach_stage_photos, get_attachments
 from app.features.admin_config.models import ShadeCheckPointDefinition
 from app.features.admin_config.service import ensure_default_shade_points
 from app.features.plm.models import Plm
@@ -24,8 +24,7 @@ def _photos(db, row):
 
 
 def _hydrate(db, report):
-    for roll in report.rolls:
-        _photos(db, roll)
+    attach_photos_bulk(db, "shade_check_roll", report.rolls)
     attach_stage_photos(db, report, report_type="shade_check_report")
     return report
 
@@ -51,7 +50,7 @@ def _snapshot_points(db: Session, report: models.ShadeCheckReport, plm: Plm) -> 
 
 @router.post("", response_model=schemas.ReportOut)
 @retry_on_conflict
-def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
+def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), _=Depends(require_roles("inspection"))):
     existing = db.query(models.ShadeCheckReport).options(
         joinedload(models.ShadeCheckReport.rolls).joinedload(models.ShadeCheckRoll.results)
     ).filter(models.ShadeCheckReport.plm_id == payload.plm_id).first()
@@ -107,7 +106,7 @@ def get_report(report_id: UUID, db: Session = Depends(get_db)):
 
 
 @router.patch("/{report_id}", response_model=schemas.ReportOut)
-def update_report(report_id: UUID, payload: schemas.ReportUpdate, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
+def update_report(report_id: UUID, payload: schemas.ReportUpdate, db: Session = Depends(get_db), _=Depends(require_roles("inspection"))):
     report = db.query(models.ShadeCheckReport).get(report_id)
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
@@ -120,7 +119,7 @@ def update_report(report_id: UUID, payload: schemas.ReportUpdate, db: Session = 
 
 @router.post("/{report_id}/rolls", response_model=schemas.RollOut)
 @retry_on_conflict
-def upsert_roll(report_id: UUID, payload: schemas.RollIn, response: Response, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
+def upsert_roll(report_id: UUID, payload: schemas.RollIn, response: Response, db: Session = Depends(get_db), _=Depends(require_roles("inspection"))):
     report = db.query(models.ShadeCheckReport).get(report_id)
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
@@ -175,7 +174,7 @@ def upsert_roll(report_id: UUID, payload: schemas.RollIn, response: Response, db
             point_type_snapshot=snap.get("check_type"),
         ))
 
-    db.commit()
+    db.flush()
     db.refresh(roll)
     upsert_inspection_report(
         db,

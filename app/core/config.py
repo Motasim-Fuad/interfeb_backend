@@ -1,5 +1,11 @@
-from pydantic_settings import BaseSettings
+import os
 from functools import lru_cache
+from typing import Optional
+
+from pydantic_settings import BaseSettings
+
+PLACEHOLDER_SECRETS = {"change-this-secret-in-production", "change-this-setup-secret", "change-me", ""}
+_LOCAL_ENVS = {"local", "dev", "development", "test"}
 
 
 class Settings(BaseSettings):
@@ -7,6 +13,16 @@ class Settings(BaseSettings):
     APP_NAME: str = "Interfab QC Backend"
     ENV: str = "local"
     DEBUG: bool = True
+    # Factory clock: "today" for report dates is the factory's day, not the server's (UTC) day.
+    TIMEZONE: str = "Asia/Dhaka"
+    # Swagger UI at /docs. Unset = on locally, off in production.
+    ENABLE_DOCS: Optional[bool] = None
+
+    # Database connection pool, per worker process. Keep pool_size * workers under the DB's connection limit.
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 5
+    DB_POOL_TIMEOUT_SECONDS: int = 10
+    DB_POOL_RECYCLE_SECONDS: int = 300
 
     # Database
     DATABASE_URL: str = "postgresql+psycopg2://interfab:interfab@db:5432/interfab"
@@ -55,6 +71,25 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         case_sensitive = True
+
+    @property
+    def is_production(self) -> bool:
+        # Render sets RENDER=true on every service, so a forgotten ENV still counts as production there.
+        return self.ENV.lower() not in _LOCAL_ENVS or bool(os.environ.get("RENDER"))
+
+    @property
+    def docs_enabled(self) -> bool:
+        return self.ENABLE_DOCS if self.ENABLE_DOCS is not None else not self.is_production
+
+    @property
+    def admin_setup_enabled(self) -> bool:
+        strong = self.ADMIN_SETUP_SECRET not in PLACEHOLDER_SECRETS and len(self.ADMIN_SETUP_SECRET) >= 16
+        return strong or (not self.is_production and bool(self.ADMIN_SETUP_SECRET))
+
+    def assert_secure(self) -> None:
+        """A placeholder JWT secret lets anyone mint an admin token, so production refuses to start."""
+        if self.is_production and (self.JWT_SECRET_KEY in PLACEHOLDER_SECRETS or len(self.JWT_SECRET_KEY) < 32):
+            raise RuntimeError("JWT_SECRET_KEY must be set to a random value of at least 32 characters in production.")
 
 
 @lru_cache

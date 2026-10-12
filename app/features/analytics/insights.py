@@ -19,6 +19,7 @@ from app.features.fabric_inspection.models import (
 )
 from app.features.fabric_inspection.service import CM_PER_INCH, FOUR_POINT_CONSTANT, YARDS_PER_METER
 from app.features.plm.models import InspectionSchedule, Plm, PlmColor, PlmRoll
+from app.core.clock import factory_today
 
 EVENT_AT = func.coalesce(Roll.inspected_at, Roll.created_at)
 
@@ -66,7 +67,7 @@ def _scope(q, *, buyer_id=None, supplier_id=None, date_from: Optional[date] = No
 
 
 def kpis(db: Session, **f) -> dict:
-    today = date.today()
+    today = factory_today()
     row = _scope(_roll_query(
         db,
         func.count(Roll.id),
@@ -194,7 +195,7 @@ def supplier_scorecard(db: Session, **f) -> list[dict]:
         comm_q = comm_q.filter((SupplierMonthlyInput.year * 100 + SupplierMonthlyInput.month) <= dt.year * 100 + dt.month)
     comm = {sid: float(avg) for sid, avg in comm_q.group_by(SupplierMonthlyInput.supplier_id).all() if avg is not None}
 
-    end = dt or date.today()
+    end = dt or factory_today()
     start = _month_add(date(end.year, end.month, 1), -5)
     bucket = func.date_trunc("month", EVENT_AT).label("bucket")
     trend_f = {k: v for k, v in f.items() if k not in ("date_from", "date_to")}
@@ -309,5 +310,5 @@ def disposition_summary(db: Session, **f) -> list[dict]:
 def default_trend_granularity(date_from: Optional[date], date_to: Optional[date]) -> str:
     if not date_from:
         return "month"
-    span = ((date_to or date.today()) - date_from).days
+    span = ((date_to or factory_today()) - date_from).days
     return "day" if span <= 31 else "week" if span <= 180 else "month"

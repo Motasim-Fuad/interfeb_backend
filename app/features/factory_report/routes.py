@@ -80,7 +80,7 @@ def refresh_factory_report_for_plm(db: Session, plm: Plm):
 def create_or_update_report(
     payload: schemas.FactoryReportCreate,
     db: Session = Depends(get_db),
-    _=Depends(require_roles("inspection", "worker")),
+    _=Depends(require_roles("inspection")),
 ):
     """Compatibility endpoint; Factory Report is derived from the PLM's 4-point report."""
     plm = db.query(Plm).get(payload.plm_id)

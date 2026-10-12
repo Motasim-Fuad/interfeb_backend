@@ -3,11 +3,14 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.rate_limit import rate_limiter
 from app.features.report_export.service import build_report_pdf, BUILDERS
 from app.features.report_export.analytics_pdf import ANALYSIS_KINDS, build_analysis_pdf
 from app.features.plm.models import Plm
 
-router = APIRouter(prefix='/reports', tags=['Canonical Printable Reports'])
+# PDF rendering is CPU-bound; one factory NAT address can host several devices, so the cap is generous.
+router = APIRouter(prefix='/reports', tags=['Canonical Printable Reports'],
+                   dependencies=[Depends(rate_limiter('report_pdf', 60, 60))])
 
 
 @router.get('/pdf/analysis/{kind}')

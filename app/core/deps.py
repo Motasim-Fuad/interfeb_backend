@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Iterable, Optional
 
 from fastapi import Depends, HTTPException, status
@@ -20,6 +21,7 @@ class CurrentUser:
 
 ACCESS_CODE_BLOCKED = "access_code_blocked"
 ACCESS_CODE_REMOVED = "access_code_removed"
+ACCESS_CODE_EXPIRED = "access_code_expired"
 
 
 def _ensure_access_code_usable(db: Session, code_id: Optional[str]) -> None:
@@ -36,6 +38,22 @@ def _ensure_access_code_usable(db: Session, code_id: Optional[str]) -> None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ACCESS_CODE_REMOVED)
     if not row.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ACCESS_CODE_BLOCKED)
+    if row.expires_at and row.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=ACCESS_CODE_EXPIRED)
+
+
+def _ensure_admin_active(db: Session, admin_id: Optional[str]) -> None:
+    """Deactivating or deleting an admin ends their session now, not when the JWT expires."""
+    from uuid import UUID
+
+    from app.features.auth.models import AdminUser
+
+    try:
+        row = db.get(AdminUser, UUID(str(admin_id)))
+    except (TypeError, ValueError):
+        row = None
+    if row is None or not row.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
 
 def get_current_user(
@@ -49,7 +67,9 @@ def get_current_user(
     if payload is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
 
-    if not payload.get("is_admin", False):
+    if payload.get("is_admin", False):
+        _ensure_admin_active(db, payload.get("sub"))
+    else:
         _ensure_access_code_usable(db, payload.get("sub"))
 
     return CurrentUser(

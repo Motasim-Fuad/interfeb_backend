@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 
 from app.features.assistant import llm, nlu, query, vector_store
 from app.features.assistant.embedder import normalize_tokens
+from app.features.assistant.datasets import DATASETS
 from app.features.assistant.models import AssistantConversation, AssistantMessage
 from app.features.assistant.tools import TOOLS, Reply, llm_tool_specs, tr
 
@@ -160,11 +161,15 @@ def _resolve_llm_args(db: Session, args: dict, slots: nlu.Slots) -> dict:
     return out
 
 
+_LLM_OPS = {"count", "list", "sum", "avg", "max", "min", "best", "worst"}
+
+
 def plan(db: Session, message: str, context: dict, history: list[dict]) -> tuple[str, dict, nlu.Slots, str]:
     """Returns (tool, args, slots, planner)."""
     slots = nlu.parse(db, message)
     prev_tool, prev_args = context.get("tool"), dict(context.get("args") or {})
     filters = slots.filters()
+    text = slots.text or message
 
     if llm.llm_enabled():
         hint = f"previous tool={prev_tool} args={prev_args}" if prev_tool else "new conversation"
@@ -173,13 +178,13 @@ def plan(db: Session, message: str, context: dict, history: list[dict]) -> tuple
             raw = dict(decision.get("args") or {})
             args = _resolve_llm_args(db, raw, slots)
             if decision["tool"] == "query":
-                args.update({"dataset": raw.get("dataset", "plms"), "op": raw.get("op", "count"),
-                             "question": f"{raw.get('metric', '')} {text}".lower()})
+                dataset = raw.get("dataset") if raw.get("dataset") in DATASETS else "plms"
+                op = raw.get("op") if raw.get("op") in _LLM_OPS else "count"
+                args.update({"dataset": dataset, "op": op, "question": f"{raw.get('metric', '')} {text}".lower()})
             return decision["tool"], args, slots, "llm"
         if decision and decision.get("reply"):
             return "_llm_reply", {"text": decision["reply"]}, slots, "llm"
 
-    text = slots.text or message
     code = _CODE.search(message)
     if code and not (slots.entities.get("plm") or slots.entities.get("consignment")):
         return "_not_found", {"code": code.group(0).upper()}, slots, "rules"

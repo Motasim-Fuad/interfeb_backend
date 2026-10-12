@@ -41,9 +41,11 @@ def _rate(p: int, f: int) -> Optional[float]:
     return round(p / (p + f) * 100, 1) if (p + f) else None
 
 
-def _roll_stats_by(db: Session, group_col, args: dict) -> dict:
+def _roll_stats_by(db: Session, group_col, args: dict, only: Optional[list] = None) -> dict:
     q = insights._roll_query(db, group_col, func.count(Roll.id), PASSED, FAILED)
     q = insights._scope(q, date_from=_d(args.get("date_from")), date_to=_d(args.get("date_to")))
+    if only is not None:
+        q = q.filter(group_col.in_(only))
     return {k: (int(n or 0), int(p or 0), int(f or 0)) for k, n, p, f in q.group_by(group_col).all()}
 
 
@@ -99,7 +101,7 @@ def ds_plms(db: Session, args: dict):
     ids = [p.id for p in plms]
     planned = dict(db.query(PlmColor.plm_id, func.count(PlmRoll.id)).join(PlmRoll, PlmRoll.plm_color_id == PlmColor.id)
                    .filter(PlmColor.plm_id.in_(ids)).group_by(PlmColor.plm_id).all()) if ids else {}
-    insp = {k: v for k, v in _roll_stats_by(db, Plm.id, {}).items() if k in set(ids)}
+    insp = _roll_stats_by(db, Plm.id, {}, only=ids) if ids else {}
     rows = []
     for p in plms:
         n, ps, f = insp.get(p.id, (0, 0, 0))

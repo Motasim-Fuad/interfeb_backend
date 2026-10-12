@@ -12,7 +12,7 @@ from app.features.store.service import get_float_qc_value
 from app.features.plm.models import Plm
 from app.features.relaxation import models, schemas, service
 from app.features.inspection_report.service import upsert_inspection_report
-from app.features.attachments.service import get_attachments, attach_stage_photos
+from app.features.attachments.service import attach_photos_bulk, attach_stage_photos, get_attachments
 
 router = APIRouter(prefix="/relaxation", tags=["Fabric Relaxation"])
 
@@ -32,8 +32,7 @@ def _attach_roll_and_report_stats(report: models.FabricRelaxationReport):
 
 
 def _hydrate(db: Session, report: models.FabricRelaxationReport):
-    for roll in report.rolls:
-        _attach_photos(db, roll)
+    attach_photos_bulk(db, "relaxation_roll", report.rolls)
     attach_stage_photos(db, report, report_type="relaxation_report")
     return _attach_roll_and_report_stats(report)
 
@@ -98,7 +97,7 @@ def add_roll(report_id: UUID, payload: schemas.RollIn, response: Response, db: S
         else:
             roll = models.FabricRelaxationRoll(report_id=report_id, **data)
             db.add(roll)
-        db.commit()
+        db.flush()
         db.refresh(roll)
 
         upsert_inspection_report(

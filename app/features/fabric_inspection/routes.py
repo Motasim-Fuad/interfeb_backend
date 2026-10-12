@@ -1,3 +1,4 @@
+import logging
 from datetime import date, datetime, time, timezone
 from typing import List, Optional
 from uuid import UUID
@@ -18,8 +19,10 @@ from app.features.fabric_inspection import models, schemas, service
 from app.features.inspection_report.models import InspectionReport
 from app.features.inspection_report.service import upsert_inspection_report
 from app.features.store.service import require_qc_float, get_float_qc_value
+from app.core.clock import factory_today
 
 router = APIRouter(prefix="/fabric-inspection", tags=["Fabric Inspection (4-point)"])
+logger = logging.getLogger(__name__)
 
 
 def _query(db: Session):
@@ -73,7 +76,7 @@ def _ensure_report(db: Session, plm: Plm, payload: Optional[schemas.ReportCreate
         average_standard_id=average_id,
         average_standard_snapshot=average,
         fabric_in_house_date=plm.received_at or (payload.fabric_in_house_date if payload else None),
-        inspection_date=(payload.inspection_date if payload else None) or date.today(),
+        inspection_date=(payload.inspection_date if payload else None) or factory_today(),
         consignment=plm.consignment,
         comments=payload.comments if payload else None,
         measurement_unit_snapshot=plm.measurement_unit.value if hasattr(plm.measurement_unit, "value") else str(plm.measurement_unit),
@@ -100,6 +103,7 @@ def _refresh_derived(db: Session, plm_id) -> None:
             savepoint.commit()
         except Exception:
             savepoint.rollback()
+            logger.exception("Derived report refresh failed for PLM %s (%s)", plm_id, refresh.__name__)
 
 
 def _save_roll(
@@ -184,11 +188,11 @@ def _save_roll(
                 f"{'PASS' if roll.is_pass else 'FAIL' if roll.is_pass is False else 'not evaluated'}",
         data={"defects": len(payload.defects), "percent_points": float(roll.percent_points) if roll.percent_points is not None else None},
     )
-    db.commit()
+    db.flush()
     db.refresh(roll)
 
     upsert_inspection_report(db, plm_id=report.plm_id, roll_number=roll.roll_no, color_name=roll.colour_code, module_field="fabric_inspection_roll_id", module_row_id=roll.id)
-    db.commit()
+    db.flush()
     _refresh_derived(db, report.plm_id)
     db.commit()
     invalidate_prefix("analytics")

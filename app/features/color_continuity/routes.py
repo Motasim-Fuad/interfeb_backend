@@ -69,7 +69,7 @@ def upsert_roll(card_id: UUID, payload: schemas.RollIn, response: Response, db: 
         roll = models.ColorContinuityRoll(card_id=card_id, **data)
         db.add(roll)
 
-    db.commit()
+    db.flush()
     db.refresh(roll)
 
     upsert_inspection_report(

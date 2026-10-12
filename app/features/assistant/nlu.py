@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.features.assistant import vector_store
 from app.features.assistant.embedder import normalize_tokens
+from app.core.clock import factory_today
 
 _BN_SCRIPT = re.compile(r"[\u0980-\u09ff]")
 _BANGLISH = {
@@ -82,7 +83,7 @@ def _month_range(year: int, month: int) -> tuple[date, date]:
 
 
 def parse_dates(msg: str, slots: Slots, today: Optional[date] = None) -> None:
-    today = today or date.today()
+    today = today or factory_today()
     m = msg.lower()
 
     def setr(a, b, label):

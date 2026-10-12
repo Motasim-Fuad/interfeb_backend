@@ -10,11 +10,12 @@ from app.core.list_query import bound_unscoped
 from app.core.deps import require_roles
 from app.features.skew_bowing import models, schemas, service
 from app.features.inspection_report.service import upsert_inspection_report
-from app.features.attachments.service import get_attachments, attach_stage_photos
+from app.features.attachments.service import attach_photos_bulk, attach_stage_photos, get_attachments
 from app.features.plm.models import Plm
 from app.features.store.service import resolve_qc_float, get_qc_value
 from app.features.admin_config.service import parse_optional_float
 from app.core.roll_payload import merge_roll_fields, require_before_wash_first, stamp_wash_dates
+from app.core.clock import factory_today
 
 router=APIRouter(prefix="/skew-bowing",tags=["Skew & Bowing"])
 
@@ -30,8 +31,8 @@ def _attach(db,report):
     report.attachments=get_attachments(db,"skew_bowing_report",report.id)
     attach_stage_photos(db, report, before_type="skew_before_wash", after_type="skew_after_wash")
     std=float(report.standard_point_snapshot) if report.standard_point_snapshot is not None else None
+    attach_photos_bulk(db, "skew_bowing_roll", report.rolls)
     for roll in report.rolls:
-        roll.attachments=get_attachments(db,"skew_bowing_roll",roll.id)
         for k,v in service.compute_roll_fields(roll,std,report.measurement_unit_snapshot).items():setattr(roll,k,v)
     for k,v in service.compute_report_stats(report.rolls,std,report.measurement_unit_snapshot).items():setattr(report,k,v)
     return report
@@ -48,7 +49,7 @@ def create_report(payload:schemas.ReportCreate,db:Session=Depends(get_db),_=Depe
     legacy_width_id=None
     total_roll=sum(len(c.rolls) for c in plm.colors)
     report=models.SkewBowingReport(
-        plm_id=plm.id,report_date=payload.report_date or date.today(),
+        plm_id=plm.id,report_date=payload.report_date or factory_today(),
         receive_qty=plm.allocated_quantity or plm.received_quantity or payload.receive_qty,
         total_roll=total_roll,fabric_construction=plm.fabric_composition,
         in_house_date=plm.received_at or payload.in_house_date,
@@ -95,7 +96,7 @@ def upsert_roll(report_id:UUID,payload:schemas.RollIn,response:Response,db:Sessi
             merge_roll_fields(roll, data)
         else:
             roll=models.SkewBowingRoll(report_id=report_id,**{k:v for k,v in data.items() if v is not None or k=="roll_no"});db.add(roll)
-        db.commit();db.refresh(roll)
+        db.flush();db.refresh(roll)
         upsert_inspection_report(db,plm_id=report.plm_id,roll_number=roll.roll_no,color_name=roll.colour_code,module_field="skew_report_id",module_row_id=roll.id);db.commit()
     roll.attachments=get_attachments(db,"skew_bowing_roll",roll.id)
     std=float(report.standard_point_snapshot) if report.standard_point_snapshot is not None else None

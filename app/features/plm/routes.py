@@ -93,6 +93,22 @@ def _validate_planning_payload(payload: schemas.PlmCreate, receive: FabricReceiv
         raise HTTPException(status_code=422, detail="Color planned quantities exceed the PLM allocated quantity")
 
 
+def _plm_roll_numbers(db: Session, plm_id, exclude_color_id=None) -> dict:
+    """Roll number (lower-case) -> colour code for every planned roll of the PLM. Inspection
+    rows and inspection_reports match rolls by number across the whole PLM, so it must be unique there."""
+    q = (db.query(models.PlmRoll.roll_no, models.PlmColor.colour_code)
+         .join(models.PlmColor, models.PlmColor.id == models.PlmRoll.plm_color_id)
+         .filter(models.PlmColor.plm_id == plm_id))
+    if exclude_color_id is not None:
+        q = q.filter(models.PlmColor.id != exclude_color_id)
+    return {roll_no.strip().lower(): code for roll_no, code in q.all()}
+
+
+def _reject_taken_roll(roll_no: str, taken: dict) -> None:
+    if roll_no.lower() in taken:
+        raise HTTPException(status_code=422, detail=f"Roll {roll_no} already exists in color {taken[roll_no.lower()]} of this PLM")
+
+
 def _require_roll_fields(roll: schemas.PlmRollIn) -> None:
     missing = []
     if not (roll.roll_no or "").strip():
@@ -180,6 +196,7 @@ def create_plm(payload: schemas.PlmCreate, db: Session = Depends(get_db), user: 
                  summary=f"PLM {plm.plm_code} created ({payload.allocated_quantity or 0:g} {plm.quantity_unit})")
 
     seen_colors = set()
+    seen_rolls = set()
     for color_in in payload.colors:
         key = color_in.colour_code.strip().lower()
         if key in seen_colors:
@@ -192,13 +209,12 @@ def create_plm(payload: schemas.PlmCreate, db: Session = Depends(get_db), user: 
         )
         db.add(color)
         db.flush()
-        seen_rolls = set()
         for roll_in in color_in.rolls:
             roll_no = roll_in.roll_no.strip()
             if not roll_no or roll_no.lower() in seen_rolls:
                 raise HTTPException(status_code=422, detail=f"Duplicate/empty roll number in {color.colour_code}: {roll_no}")
             seen_rolls.add(roll_no.lower())
-            db.add(models.PlmRoll(plm_color_id=color.id, **roll_in.model_dump()))
+            db.add(models.PlmRoll(plm_color_id=color.id, **{**roll_in.model_dump(), "roll_no": roll_no}))
 
     db.commit()
     return _plm_query(db).get(plm.id)
@@ -240,9 +256,15 @@ def add_color(plm_id: UUID, payload: schemas.PlmColorIn, db: Session = Depends(g
     )
     db.add(color)
     db.flush()
+    taken = _plm_roll_numbers(db, plm_id)
     for r in payload.rolls:
         _require_roll_fields(r)
-        db.add(models.PlmRoll(plm_color_id=color.id, **r.model_dump()))
+        roll_no = r.roll_no.strip()
+        if not roll_no:
+            raise HTTPException(status_code=422, detail="Roll number is required")
+        _reject_taken_roll(roll_no, taken)
+        taken[roll_no.lower()] = color.colour_code
+        db.add(models.PlmRoll(plm_color_id=color.id, **{**r.model_dump(), "roll_no": roll_no}))
     db.flush()
     _sync_color_quantity(db, color)
     db.commit()
@@ -263,6 +285,7 @@ def add_roll(color_id: UUID, payload: schemas.PlmRollIn, db: Session = Depends(g
     ).first()
     if existing:
         raise HTTPException(status_code=400, detail=f"Roll {roll_no} already exists under this color")
+    _reject_taken_roll(roll_no, _plm_roll_numbers(db, color.plm_id, exclude_color_id=color.id))
     row = models.PlmRoll(plm_color_id=color_id, **payload.model_dump())
     row.roll_no = roll_no
     db.add(row)
@@ -286,8 +309,10 @@ def bulk_add_rolls(color_id: UUID, payload: schemas.PlmRollBulkCreate, db: Sessi
     existing = {
         r.roll_no.lower(): r for r in db.query(models.PlmRoll).filter(models.PlmRoll.plm_color_id == color_id).all()
     }
+    other_colors = _plm_roll_numbers(db, color.plm_id, exclude_color_id=color.id)
     created = []
     for roll_no in numbers:
+        _reject_taken_roll(roll_no, other_colors)
         if roll_no.lower() in existing:
             # Idempotent bulk operation: update common planned fields instead of duplicating.
             row = existing[roll_no.lower()]
@@ -462,10 +487,10 @@ def update_schedule_status(schedule_id: UUID, payload: schemas.ScheduleStatusUpd
     row = _schedule_query(db).get(schedule_id)
     if not row:
         raise HTTPException(status_code=404, detail="Schedule not found")
+    if user.role == "worker" and not user.is_admin and payload.status != "in_progress":
+        raise HTTPException(status_code=403, detail="Workers can only start a scheduled inspection")
     if payload.status not in ("pending", "in_progress", "completed"):
         raise HTTPException(status_code=422, detail="status must be pending, in_progress, or completed")
-    if not user.is_admin and user.role == "worker" and payload.status != "in_progress":
-        raise HTTPException(status_code=403, detail="Workers can only start a schedule")
     before = row.status
     row.status = payload.status
     if before != payload.status:

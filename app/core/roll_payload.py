@@ -2,6 +2,7 @@
 from datetime import date
 
 from fastapi import HTTPException
+from app.core.clock import factory_today
 
 
 def merge_roll_fields(roll, data: dict) -> None:
@@ -14,7 +15,7 @@ def merge_roll_fields(roll, data: dict) -> None:
 
 def stamp_wash_dates(roll, data: dict, before_keys: tuple[str, ...], after_keys: tuple[str, ...]) -> None:
     """Fill missing before/after wash dates on first save so printable reports are not blank."""
-    today = date.today()
+    today = factory_today()
     if any(data.get(key) is not None for key in before_keys):
         stored = getattr(roll, "before_wash_date", None) if roll is not None else None
         if not data.get("before_wash_date") and stored is None:

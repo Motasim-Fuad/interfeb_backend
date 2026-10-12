@@ -1,3 +1,5 @@
+import hmac
+import re
 from datetime import datetime
 from typing import List
 from uuid import UUID
@@ -17,9 +19,13 @@ from app.features.auth import models, schemas
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
+# Current code format always has a lookup digest, so it never needs the slow legacy bcrypt scan.
+_NEW_CODE = re.compile(r"[A-Z]{2}-[A-HJ-NP-Z2-9]{8}")
+
 
 # ---------------- Admin auth ----------------
-@router.post("/admin/register", response_model=schemas.AccessCodeOut, include_in_schema=True)
+@router.post("/admin/register", response_model=schemas.AccessCodeOut, include_in_schema=True,
+             dependencies=[Depends(rate_limiter("admin_register", 5, 300))])
 def register_admin(payload: schemas.AdminUserCreate, db: Session = Depends(get_db)):
     """
     Requires ADMIN_SETUP_SECRET (set in .env) - only someone who knows this secret can
@@ -27,7 +33,9 @@ def register_admin(payload: schemas.AdminUserCreate, db: Session = Depends(get_d
     open (not behind a login) since there's no admin to log in as before the first one exists,
     but the secret keeps it from being public.
     """
-    if payload.setup_secret != settings.ADMIN_SETUP_SECRET:
+    if not settings.admin_setup_enabled:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin registration is disabled on this server")
+    if not hmac.compare_digest(payload.setup_secret.encode(), settings.ADMIN_SETUP_SECRET.encode()):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid setup secret")
 
     existing = db.query(models.AdminUser).filter(models.AdminUser.email == payload.email).first()
@@ -48,7 +56,7 @@ def register_admin(payload: schemas.AdminUserCreate, db: Session = Depends(get_d
     }
 
 
-@router.post("/admin/login", response_model=schemas.TokenResponse, dependencies=[Depends(rate_limiter("admin_login", 10, 60))])
+@router.post("/admin/login", response_model=schemas.TokenResponse, dependencies=[Depends(rate_limiter("admin_login", 10, 60, global_max_hits=200))])
 def admin_login(payload: schemas.AdminLoginRequest, db: Session = Depends(get_db)):
     admin = db.query(models.AdminUser).filter(models.AdminUser.email == payload.email).first()
     if not admin or not verify_secret(payload.password, admin.password_hash) or not admin.is_active:
@@ -133,7 +141,7 @@ def deactivate_access_code(code_id: UUID, db: Session = Depends(get_db), admin: 
     return row
 
 
-@router.post("/app/login", response_model=schemas.TokenResponse, dependencies=[Depends(rate_limiter("app_login", 20, 60))])
+@router.post("/app/login", response_model=schemas.TokenResponse, dependencies=[Depends(rate_limiter("app_login", 20, 60, global_max_hits=300))])
 def app_login(payload: schemas.AppLoginRequest, db: Session = Depends(get_db)):
     """Flutter app calls this with the role-based code the admin generated."""
     lookup = access_code_lookup(payload.code)
@@ -141,7 +149,7 @@ def app_login(payload: schemas.AppLoginRequest, db: Session = Depends(get_db)):
     row = db.query(models.AccessCode).filter(models.AccessCode.code_lookup == lookup).first()
     if row and (verify_secret(payload.code.strip().upper(), row.code_hash) or verify_secret(payload.code, row.code_hash)):
         matched = row
-    if matched is None:
+    if matched is None and not _NEW_CODE.fullmatch(payload.code.strip().upper()):
         # Codes created before code_lookup existed: scan once, then backfill the digest.
         legacy = db.query(models.AccessCode).filter(
             models.AccessCode.is_active == True,  # noqa: E712

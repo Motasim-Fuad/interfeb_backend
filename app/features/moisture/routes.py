@@ -15,6 +15,7 @@ from app.features.store.service import resolve_qc_float
 from app.features.attachments.service import attach_stage_photos
 from app.features.admin_config.service import parse_optional_float
 from app.core.roll_payload import merge_roll_fields, require_before_wash_first, stamp_wash_dates
+from app.core.clock import factory_today
 
 router = APIRouter(prefix="/moisture", tags=["Moisture Check"])
 
@@ -57,7 +58,7 @@ def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), 
 
     report = models.MoistureCheckReport(
         plm_id=plm.id,
-        report_date=payload.report_date or date.today(),
+        report_date=payload.report_date or factory_today(),
         report_time=payload.report_time,
         vendor=plm.supplier.name if plm.supplier else payload.vendor,
         factory=payload.factory,
@@ -102,6 +103,6 @@ def upsert_roll(report_id: UUID, payload: schemas.RollIn, response: Response, db
         merge_roll_fields(roll, data)
     else:
         roll = models.MoistureCheckRoll(report_id=report_id, **{k: v for k, v in data.items() if v is not None or k == "roll_no"}); db.add(roll)
-    db.commit(); db.refresh(roll)
+    db.flush(); db.refresh(roll)
     upsert_inspection_report(db, plm_id=report.plm_id, roll_number=roll.roll_no, color_name=roll.color, module_field="moisture_report_id", module_row_id=roll.id)
     db.commit(); return roll

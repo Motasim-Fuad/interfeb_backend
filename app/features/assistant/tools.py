@@ -22,6 +22,7 @@ from app.features.relaxation.models import FabricRelaxationReport
 from app.features.shade_check.models import ShadeCheckReport
 from app.features.shrinkage.models import ShrinkagePatternReport
 from app.features.skew_bowing.models import SkewBowingReport
+from app.core.clock import factory_today
 
 PREVIEW_ROWS = 8
 DETAIL_PREVIEW_ROWS = 25
@@ -530,7 +531,7 @@ def tool_help(db: Session, a: dict, lang: str) -> Reply:
 
 
 def tool_greeting(db: Session, a: dict, lang: str) -> Reply:
-    k = insights.kpis(db, date_from=date.today().replace(day=1), date_to=date.today())
+    k = insights.kpis(db, date_from=factory_today().replace(day=1), date_to=factory_today())
     return Reply(tr(lang, f"Hi! I'm FabriQ. This month {k['rolls_inspected']} rolls are inspected with a {_fmt_pct(k['pass_rate'])} pass rate. What do you need?",
                     f"হ্যালো! আমি FabriQ। এই মাসে {k['rolls_inspected']}টি রোল ইন্সপেক্ট হয়েছে, পাস রেট {_fmt_pct(k['pass_rate'])}। কী জানতে চান?"),
                  [], [tr(lang, "Summary of this month", "এই মাসের সারাংশ"), tr(lang, "What can you do?", "তুমি কী কী পারো?")])

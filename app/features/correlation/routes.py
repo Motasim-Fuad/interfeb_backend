@@ -158,7 +158,7 @@ def refresh_correlation_for_plm(db: Session, plm: Plm) -> models.FabricCorrelati
 
 @router.post("", response_model=schemas.ReportOut)
 @retry_on_conflict
-def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
+def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), _=Depends(require_roles("inspection"))):
     plm = db.query(Plm).get(payload.plm_id)
     if not plm:
         raise HTTPException(status_code=404, detail="PLM not found")
@@ -207,7 +207,7 @@ def get_report(report_id: UUID, db: Session = Depends(get_db)):
 # will always restore Dashboard + 4-point source-of-truth values.
 @router.post("/{report_id}/rolls", response_model=schemas.RollOut)
 @retry_on_conflict
-def upsert_roll(report_id: UUID, payload: schemas.RollIn, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
+def upsert_roll(report_id: UUID, payload: schemas.RollIn, db: Session = Depends(get_db), _=Depends(require_roles("inspection"))):
     report = db.query(models.FabricCorrelationReport).get(report_id)
     if not report:
         raise HTTPException(status_code=404, detail="Report not found")
@@ -252,7 +252,9 @@ def upsert_roll(report_id: UUID, payload: schemas.RollIn, db: Session = Depends(
     length_yards = length_to_yards(float(roll.length_yards), quantity_unit) if roll.length_yards else 0
     if width_inches > 0 and length_yards > 0:
         roll.factory_percent_points = (total * FOUR_POINT_CONSTANT) / (width_inches * length_yards)
-    db.commit()
+    else:
+        roll.factory_percent_points = None
+    db.flush()
     db.refresh(roll)
     upsert_inspection_report(
         db,

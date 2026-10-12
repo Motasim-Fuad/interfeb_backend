@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.deps import CurrentUser, require_admin
+from app.core.rate_limit import rate_limiter
 from app.features.assistant import engine, llm, vector_store
 from app.features.assistant.datasets import DATASETS, MAX_ROWS, run_dataset
 from app.features.assistant.embedder import get_embedder
@@ -23,11 +24,11 @@ class ChatIn(BaseModel):
 
 
 class DatasetIn(BaseModel):
-    name: str
-    args: dict = Field(default_factory=dict)
-    q: str = ""
-    filters: dict = Field(default_factory=dict)
-    sort: Optional[str] = None
+    name: str = Field(max_length=64)
+    args: dict = Field(default_factory=dict, max_length=30)
+    q: str = Field(default="", max_length=200)
+    filters: dict = Field(default_factory=dict, max_length=30)
+    sort: Optional[str] = Field(default=None, max_length=64)
     desc: bool = False
     limit: int = Field(default=50, ge=1, le=MAX_ROWS)
     offset: int = Field(default=0, ge=0)
@@ -57,7 +58,7 @@ def status(db: Session = Depends(get_db), user: CurrentUser = Depends(require_ad
     }
 
 
-@router.post("/reindex")
+@router.post("/reindex", dependencies=[Depends(rate_limiter("assistant_reindex", 3, 300))])
 def reindex(db: Session = Depends(get_db), user: CurrentUser = Depends(require_admin())):
     result = vector_store.ensure_index(db, force=True)
     return {**result, "documents": vector_store.document_count(db)}

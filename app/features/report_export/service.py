@@ -776,7 +776,7 @@ def _gsm(db, plm):
             if actual is None:
                 continue
             pct = gsm_service.over_less_pct(float(actual), std)
-            flags.append(abs(pct) <= tol if tol is not None else None)
+            flags.append(abs(pct) <= tol if tol is not None and std else None)
     swatches = [
         ('Before Wash', _stage_photo(db, 'gsm_before_wash', r.id, fallback_roll_type='gsm_roll', roll_ids=[x.id for x in r.rolls])),
         ('After Wash', _stage_photo(db, 'gsm_after_wash', r.id)),
@@ -1140,6 +1140,7 @@ def _factory(db, plm):
     mill_area = 0.0
     mill_length = 0.0
     mill_widths = []
+    mill_area_complete = True
     for r in mill_rolls:
         length = float(r.marked_length or 0)
         width = float(r.marked_width or 0)
@@ -1150,8 +1151,9 @@ def _factory(db, plm):
                 from app.features.fabric_inspection.service import width_to_inches, length_to_yards
                 mill_area += width_to_inches(width, plm.measurement_unit.value if hasattr(plm.measurement_unit, 'value') else str(plm.measurement_unit)) * length_to_yards(length, plm.quantity_unit)
             except ValueError:
-                pass
-    mill_avg = (mill_points * 3600 / mill_area) if mill_area > 0 else None
+                mill_area_complete = False
+    # A roll whose size can't be converted would shrink the area and inflate the score; show nothing instead.
+    mill_avg = (mill_points * 3600 / mill_area) if mill_area > 0 and mill_area_complete else None
     standard = float(report.standard_snapshot) if report.standard_snapshot is not None else None
     mill_pass = (mill_avg <= standard) if mill_avg is not None and standard is not None else None
     source = _four_point_for_export(db, plm.id)

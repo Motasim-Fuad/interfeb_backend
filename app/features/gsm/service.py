@@ -26,11 +26,14 @@ def compute_report_stats(rolls: List[GsmCheckRoll], standard_gsm: float, toleran
     avg_gsm_before = sum(before_vals) / len(before_vals) if before_vals else None
     avg_gsm_after = sum(after_vals) / len(after_vals) if after_vals else None
 
+    # Without a required GSM there is no deviation to judge; 0% would wrongly read as PASS.
     avg_over_less_before_pct = (
-        sum(over_less_pct(v, standard_gsm) for v in before_vals) / len(before_vals) if before_vals else None
+        sum(over_less_pct(v, standard_gsm) for v in before_vals) / len(before_vals)
+        if before_vals and standard_gsm else None
     )
     avg_over_less_after_pct = (
-        sum(over_less_pct(v, standard_gsm) for v in after_vals) / len(after_vals) if after_vals else None
+        sum(over_less_pct(v, standard_gsm) for v in after_vals) / len(after_vals)
+        if after_vals and standard_gsm else None
     )
 
     return {

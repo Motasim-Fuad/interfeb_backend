@@ -27,6 +27,7 @@ from app.features.store.models import FabricReceive
 from app.features.inspection_report.models import InspectionReport
 from app.features.factory_report.models import FactoryReport
 from app.features.analytics import schemas
+from app.core.clock import factory_today
 
 router = APIRouter(prefix="/analytics", tags=["Analytics / Ranking"])
 
@@ -304,7 +305,7 @@ def kpi_summary(
     db: Session = Depends(get_db),
 ):
     f = _filters(buyer_id, supplier_id, date_from, date_to)
-    return cached(make_key("analytics", kind="kpis", today=date.today(), **f), INSIGHT_TTL_SECONDS, lambda: insights.kpis(db, **f))
+    return cached(make_key("analytics", kind="kpis", today=factory_today(), **f), INSIGHT_TTL_SECONDS, lambda: insights.kpis(db, **f))
 
 
 @router.get("/trend", response_model=List[schemas.TrendPoint])
@@ -343,7 +344,7 @@ def supplier_scorecard(
     db: Session = Depends(get_db),
 ):
     f = _filters(buyer_id, supplier_id, date_from, date_to)
-    return cached(make_key("analytics", kind="scorecard", today=date.today(), **f), INSIGHT_TTL_SECONDS, lambda: insights.supplier_scorecard(db, **f))
+    return cached(make_key("analytics", kind="scorecard", today=factory_today(), **f), INSIGHT_TTL_SECONDS, lambda: insights.supplier_scorecard(db, **f))
 
 
 @router.get("/defect-heatmap", response_model=schemas.DefectHeatmap)
