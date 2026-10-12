@@ -8,6 +8,7 @@ from app.core.database import Base
 
 class FabricRelaxationReport(Base, BaseEntity):
     __tablename__ = "fabric_relaxation_reports"
+    __table_args__ = (UniqueConstraint("plm_id", name="uq_fabric_relaxation_reports_plm"),)
 
     plm_id = Column(UUID(as_uuid=True), ForeignKey("plms.id"), nullable=False, index=True)
     color = Column(String, nullable=True)

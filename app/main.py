@@ -29,7 +29,7 @@ from app.features.report_export.routes import router as report_export_router
 from app.features.audit.routes import router as audit_router
 from app.features.assistant.routes import router as assistant_router
 from app.core.list_query import TOTAL_COUNT_HEADER
-from app.features.fabric_inspection.routes import SYNC_STALE_HEADER
+from app.core.sync import SYNC_STALE_HEADER
 
 app = FastAPI(
     title=settings.APP_NAME,

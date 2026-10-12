@@ -2,7 +2,7 @@ from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from app.core.sync import as_utc_naive, is_stale, mark_stale
+from app.core.sync import client_stamp, is_stale, mark_stale, retry_on_conflict
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
@@ -21,6 +21,7 @@ def _attach_totals(card: models.ColorContinuityCard):
 
 
 @router.post("", response_model=schemas.CardOut)
+@retry_on_conflict
 def create_card(payload: schemas.CardCreate, db: Session = Depends(get_db), _=Depends(require_roles("inspection"))):
     existing = db.query(models.ColorContinuityCard).options(joinedload(models.ColorContinuityCard.rolls)).filter(models.ColorContinuityCard.plm_id == payload.plm_id).first()
     if existing:
@@ -45,6 +46,7 @@ def list_cards(response: Response, plm_id: Optional[UUID] = None, limit: Optiona
 
 
 @router.post("/{card_id}/rolls", response_model=schemas.RollOut)
+@retry_on_conflict
 def upsert_roll(card_id: UUID, payload: schemas.RollIn, response: Response, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
     card = db.query(models.ColorContinuityCard).get(card_id)
     if not card:
@@ -59,7 +61,7 @@ def upsert_roll(card_id: UUID, payload: schemas.RollIn, response: Response, db: 
         mark_stale(response)
         return roll
     data = payload.model_dump()
-    data["client_updated_at"] = as_utc_naive(payload.client_updated_at)
+    data["client_updated_at"] = client_stamp(payload.client_updated_at)
     if roll:
         for k, v in data.items():
             setattr(roll, k, v)

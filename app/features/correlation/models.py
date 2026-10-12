@@ -8,6 +8,7 @@ from app.core.database import Base
 
 class FabricCorrelationReport(Base, BaseEntity):
     __tablename__ = "fabric_correlation_reports"
+    __table_args__ = (UniqueConstraint("plm_id", name="uq_fabric_correlation_reports_plm"),)
 
     plm_id = Column(UUID(as_uuid=True), ForeignKey("plms.id"), nullable=False, index=True)
     tolerance_standard_id = Column(UUID(as_uuid=True), ForeignKey("acceptance_standards.id"), nullable=True)

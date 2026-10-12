@@ -9,6 +9,7 @@ from app.core.shared_enums import RollStatusEnum
 
 class ColorContinuityCard(Base, BaseEntity):
     __tablename__ = "color_continuity_cards"
+    __table_args__ = (UniqueConstraint("plm_id", name="uq_color_continuity_cards_plm"),)
 
     plm_id = Column(UUID(as_uuid=True), ForeignKey("plms.id"), nullable=False, index=True)
 

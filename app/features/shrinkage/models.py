@@ -9,6 +9,7 @@ from app.core.shared_enums import RollStatusEnum
 
 class ShrinkagePatternReport(Base, BaseEntity):
     __tablename__ = "shrinkage_pattern_reports"
+    __table_args__ = (UniqueConstraint("plm_id", name="uq_shrinkage_pattern_reports_plm"),)
 
     plm_id = Column(UUID(as_uuid=True), ForeignKey("plms.id"), nullable=False, index=True)
     season = Column(String, nullable=True)

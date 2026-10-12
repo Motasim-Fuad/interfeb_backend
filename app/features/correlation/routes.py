@@ -4,6 +4,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session, joinedload
 
+from app.core.sync import retry_on_conflict
 from app.core.database import get_db
 from app.core.deps import require_roles
 from app.core.list_query import paginate
@@ -156,6 +157,7 @@ def refresh_correlation_for_plm(db: Session, plm: Plm) -> models.FabricCorrelati
 
 
 @router.post("", response_model=schemas.ReportOut)
+@retry_on_conflict
 def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
     plm = db.query(Plm).get(payload.plm_id)
     if not plm:
@@ -204,6 +206,7 @@ def get_report(report_id: UUID, db: Session = Depends(get_db)):
 # Backward-compatible manual endpoint. New app UI does not use it; derived sync on GET
 # will always restore Dashboard + 4-point source-of-truth values.
 @router.post("/{report_id}/rolls", response_model=schemas.RollOut)
+@retry_on_conflict
 def upsert_roll(report_id: UUID, payload: schemas.RollIn, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
     report = db.query(models.FabricCorrelationReport).get(report_id)
     if not report:

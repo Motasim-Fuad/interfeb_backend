@@ -2,7 +2,7 @@ from typing import List, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Response
-from app.core.sync import as_utc_naive, is_stale, mark_stale
+from app.core.sync import client_stamp, is_stale, mark_stale, retry_on_conflict
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
@@ -50,6 +50,7 @@ def _snapshot_points(db: Session, report: models.ShadeCheckReport, plm: Plm) -> 
 
 
 @router.post("", response_model=schemas.ReportOut)
+@retry_on_conflict
 def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
     existing = db.query(models.ShadeCheckReport).options(
         joinedload(models.ShadeCheckReport.rolls).joinedload(models.ShadeCheckRoll.results)
@@ -118,6 +119,7 @@ def update_report(report_id: UUID, payload: schemas.ReportUpdate, db: Session = 
 
 
 @router.post("/{report_id}/rolls", response_model=schemas.RollOut)
+@retry_on_conflict
 def upsert_roll(report_id: UUID, payload: schemas.RollIn, response: Response, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
     report = db.query(models.ShadeCheckReport).get(report_id)
     if not report:
@@ -138,7 +140,7 @@ def upsert_roll(report_id: UUID, payload: schemas.RollIn, response: Response, db
         mark_stale(response)
         return _photos(db, roll)
     data = payload.model_dump(exclude={"results"})
-    data["client_updated_at"] = as_utc_naive(payload.client_updated_at)
+    data["client_updated_at"] = client_stamp(payload.client_updated_at)
     if roll:
         for key, value in data.items():
             setattr(roll, key, value)

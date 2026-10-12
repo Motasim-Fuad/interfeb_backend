@@ -9,6 +9,7 @@ from app.core.shared_enums import RollStatusEnum
 
 class SkewBowingReport(Base, BaseEntity):
     __tablename__ = "skew_bowing_reports"
+    __table_args__ = (UniqueConstraint("plm_id", name="uq_skew_bowing_reports_plm"),)
 
     plm_id = Column(UUID(as_uuid=True), ForeignKey("plms.id"), nullable=False, index=True)
     report_date = Column(Date, nullable=True)

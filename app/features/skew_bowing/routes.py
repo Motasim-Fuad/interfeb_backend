@@ -2,7 +2,7 @@ from datetime import date
 from typing import List, Optional
 from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Response
-from app.core.sync import as_utc_naive, is_stale, mark_stale
+from app.core.sync import client_stamp, is_stale, mark_stale, retry_on_conflict
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
@@ -37,6 +37,7 @@ def _attach(db,report):
     return report
 
 @router.post("",response_model=schemas.ReportOut)
+@retry_on_conflict
 def create_report(payload:schemas.ReportCreate,db:Session=Depends(get_db),_=Depends(require_roles("inspection"))):
     plm=db.query(Plm).get(payload.plm_id)
     if not plm:raise HTTPException(status_code=404,detail="PLM not found")
@@ -74,13 +75,14 @@ def get_report(report_id:UUID,db:Session=Depends(get_db)):
     return _attach(db,r)
 
 @router.post("/{report_id}/rolls",response_model=schemas.RollOut)
+@retry_on_conflict
 def upsert_roll(report_id:UUID,payload:schemas.RollIn,response:Response,db:Session=Depends(get_db),_=Depends(require_roles("inspection","worker"))):
     report=db.query(models.SkewBowingReport).get(report_id)
     if not report:raise HTTPException(status_code=404,detail="Report not found")
     plm=db.query(Plm).get(report.plm_id)
     if not plm:raise HTTPException(status_code=404,detail="PLM not found")
     data=payload.model_dump()
-    data["client_updated_at"]=as_utc_naive(payload.client_updated_at)
+    data["client_updated_at"]=client_stamp(payload.client_updated_at)
     # Percentage is derived only from AC/BD; no hidden reference length is needed.
     data["reference_fabric_length"]=None
     roll=db.query(models.SkewBowingRoll).filter(models.SkewBowingRoll.report_id==report_id,models.SkewBowingRoll.roll_no==payload.roll_no).first()

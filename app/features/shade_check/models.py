@@ -8,6 +8,7 @@ from app.core.database import Base
 
 class ShadeCheckReport(Base, BaseEntity):
     __tablename__ = "shade_check_reports"
+    __table_args__ = (UniqueConstraint("plm_id", name="uq_shade_check_reports_plm"),)
 
     plm_id = Column(UUID(as_uuid=True), ForeignKey("plms.id"), nullable=False, index=True)
     comments = Column(String, nullable=True)

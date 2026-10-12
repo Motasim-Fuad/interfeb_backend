@@ -10,7 +10,7 @@ from app.core.cache import invalidate_prefix
 from app.core.database import get_db
 from app.core.deps import CurrentUser, require_roles
 from app.core.list_query import paginate
-from app.core.sync import SYNC_STALE_HEADER, as_utc_naive as _as_utc_naive
+from app.core.sync import as_utc_naive as _as_utc_naive, client_stamp, is_stale, mark_stale, retry_on_conflict
 from app.features.admin_config.models import Buyer, Supplier
 from app.features.audit.service import actor_label, record_audit, stamp_creator
 from app.features.plm.models import Plm, PlmColor, PlmRoll
@@ -118,11 +118,10 @@ def _save_roll(
         models.FabricInspectionRoll.roll_no == payload.roll_no,
     ).first()
 
-    client_ts = _as_utc_naive(payload.client_updated_at)
-    if roll is not None and client_ts is not None and roll.client_updated_at is not None and client_ts < roll.client_updated_at:
-        if response is not None:
-            response.headers[SYNC_STALE_HEADER] = "1"
+    if is_stale(roll, payload.client_updated_at):
+        mark_stale(response)
         return roll
+    client_ts = client_stamp(payload.client_updated_at)
 
     is_new = roll is None
     if is_new:
@@ -198,6 +197,7 @@ def _save_roll(
 
 
 @router.post("", response_model=schemas.ReportOut)
+@retry_on_conflict
 def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
     plm = db.query(Plm).get(payload.plm_id)
     if not plm:
@@ -346,6 +346,7 @@ def set_disposition(
 
 
 @router.post("/by-plm/{plm_id}/rolls", response_model=schemas.RollOut)
+@retry_on_conflict
 def upsert_roll_by_plm(
     plm_id: UUID,
     payload: schemas.RollIn,
@@ -362,6 +363,7 @@ def upsert_roll_by_plm(
 
 
 @router.put("/rolls/{roll_id}", response_model=schemas.RollOut)
+@retry_on_conflict
 def update_roll(
     roll_id: UUID,
     payload: schemas.RollIn,
@@ -424,6 +426,7 @@ def get_report(report_id: UUID, db: Session = Depends(get_db)):
 
 
 @router.post("/{report_id}/rolls", response_model=schemas.RollOut)
+@retry_on_conflict
 def upsert_roll(
     report_id: UUID,
     payload: schemas.RollIn,

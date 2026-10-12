@@ -9,6 +9,7 @@ from app.core.shared_enums import RollStatusEnum
 
 class MoistureCheckReport(Base, BaseEntity):
     __tablename__ = "moisture_check_reports"
+    __table_args__ = (UniqueConstraint("plm_id", name="uq_moisture_check_reports_plm"),)
 
     plm_id = Column(UUID(as_uuid=True), ForeignKey("plms.id"), nullable=False, index=True)
     report_date = Column(Date, nullable=True)
