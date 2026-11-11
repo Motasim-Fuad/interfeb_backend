@@ -14,7 +14,7 @@ from app.core.list_query import paginate
 from app.core.sync import as_utc_naive as _as_utc_naive, client_stamp, is_stale, mark_stale, retry_on_conflict
 from app.features.admin_config.models import Buyer, Supplier
 from app.features.audit.service import actor_label, record_audit, stamp_creator
-from app.features.plm.models import Plm, PlmColor, PlmRoll
+from app.features.plm.models import InspectionSchedule, Plm, PlmColor, PlmRoll
 from app.features.fabric_inspection import models, schemas, service
 from app.features.inspection_report.models import InspectionReport
 from app.features.inspection_report.service import upsert_inspection_report
@@ -106,6 +106,17 @@ def _refresh_derived(db: Session, plm_id) -> None:
             logger.exception("Derived report refresh failed for PLM %s (%s)", plm_id, refresh.__name__)
 
 
+def _start_pending_schedules(db: Session, plm_id, user: CurrentUser) -> None:
+    """The first saved roll starts the PLM's pending schedule; completion stays a human decision."""
+    pending = db.query(InspectionSchedule).filter(
+        InspectionSchedule.plm_id == plm_id, InspectionSchedule.status == "pending",
+    ).all()
+    for schedule in pending:
+        schedule.status = "in_progress"
+        record_audit(db, user, action="schedule_status", entity_type="inspection_schedule", entity_id=schedule.id,
+                     plm_id=plm_id, summary=f"Schedule {schedule.plm_code}: pending -> in_progress (first roll saved)")
+
+
 def _save_roll(
     db: Session,
     report: models.FabricInspectionReport,
@@ -193,6 +204,7 @@ def _save_roll(
 
     upsert_inspection_report(db, plm_id=report.plm_id, roll_number=roll.roll_no, color_name=roll.colour_code, module_field="fabric_inspection_roll_id", module_row_id=roll.id)
     db.flush()
+    _start_pending_schedules(db, report.plm_id, user)
     _refresh_derived(db, report.plm_id)
     db.commit()
     invalidate_prefix("analytics")

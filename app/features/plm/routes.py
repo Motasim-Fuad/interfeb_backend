@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload, noload, selectinload
 
+from app.core.clock import factory_today
 from app.core.database import get_db
 from app.core.deps import CurrentUser, require_roles, require_admin
 from app.core.list_query import apply_text_search, apply_year_month, paginate
@@ -238,7 +239,7 @@ def update_plm(plm_id: UUID, payload: schemas.PlmUpdate, db: Session = Depends(g
 
 
 @router.post("/{plm_id}/colors", response_model=schemas.PlmColorOut)
-def add_color(plm_id: UUID, payload: schemas.PlmColorIn, db: Session = Depends(get_db), _=Depends(require_roles("inspection"))):
+def add_color(plm_id: UUID, payload: schemas.PlmColorIn, db: Session = Depends(get_db), _=Depends(require_admin())):
     if not db.query(models.Plm).get(plm_id):
         raise HTTPException(status_code=404, detail="PLM not found")
     existing = db.query(models.PlmColor).filter(
@@ -273,7 +274,7 @@ def add_color(plm_id: UUID, payload: schemas.PlmColorIn, db: Session = Depends(g
 
 
 @router.post("/colors/{color_id}/rolls", response_model=schemas.PlmRollOut)
-def add_roll(color_id: UUID, payload: schemas.PlmRollIn, db: Session = Depends(get_db), _=Depends(require_roles("inspection"))):
+def add_roll(color_id: UUID, payload: schemas.PlmRollIn, db: Session = Depends(get_db), _=Depends(require_admin())):
     color = db.query(models.PlmColor).get(color_id)
     if not color:
         raise HTTPException(status_code=404, detail="PLM color not found")
@@ -297,7 +298,7 @@ def add_roll(color_id: UUID, payload: schemas.PlmRollIn, db: Session = Depends(g
 
 
 @router.post("/colors/{color_id}/rolls/bulk", response_model=List[schemas.PlmRollOut])
-def bulk_add_rolls(color_id: UUID, payload: schemas.PlmRollBulkCreate, db: Session = Depends(get_db), _=Depends(require_roles("inspection"))):
+def bulk_add_rolls(color_id: UUID, payload: schemas.PlmRollBulkCreate, db: Session = Depends(get_db), _=Depends(require_admin())):
     color = db.query(models.PlmColor).get(color_id)
     if not color:
         raise HTTPException(status_code=404, detail="PLM color not found")
@@ -352,8 +353,102 @@ def bulk_add_rolls(color_id: UUID, payload: schemas.PlmRollBulkCreate, db: Sessi
     return created
 
 
+_IMPORT_FIELDS = ("marked_width", "marked_length", "planned_quantity", "supplier_total_point")
+
+
+@router.post("/{plm_id}/rolls/import", response_model=schemas.RollImportResult)
+def import_rolls(plm_id: UUID, payload: schemas.RollImportIn, db: Session = Depends(get_db), user: CurrentUser = Depends(require_admin())):
+    """Packing-list import. dry_run returns the preview only; a real run writes nothing unless every line is valid."""
+    plm = db.query(models.Plm).get(plm_id)
+    if not plm:
+        raise HTTPException(status_code=404, detail="PLM not found")
+
+    colors = {c.colour_code.strip().lower(): c for c in db.query(models.PlmColor).filter(models.PlmColor.plm_id == plm_id).all()}
+    existing = {}
+    for roll, code in (db.query(models.PlmRoll, models.PlmColor.colour_code)
+                       .join(models.PlmColor, models.PlmColor.id == models.PlmRoll.plm_color_id)
+                       .filter(models.PlmColor.plm_id == plm_id).all()):
+        existing[roll.roll_no.strip().lower()] = (roll, code)
+
+    lines: List[schemas.RollImportLine] = []
+    plan = []
+    new_colors: dict = {}
+    seen: dict = {}
+    counts = {"new": 0, "update": 0, "unchanged": 0, "error": 0}
+
+    for row in payload.rows:
+        color = row.color.strip()
+        roll_no = row.roll_no.strip()
+        problems = []
+        if not color:
+            problems.append("color is required")
+        if not roll_no:
+            problems.append("roll number is required")
+        for key, label in (("marked_width", "marked width"), ("marked_length", "marked length"), ("planned_quantity", "quantity")):
+            value = getattr(row, key)
+            if value is None or value <= 0:
+                problems.append(f"{label} must be greater than 0")
+        if row.supplier_total_point is None or row.supplier_total_point < 0:
+            problems.append("supplier points must be 0 or more")
+        if roll_no:
+            first = seen.setdefault(roll_no.lower(), row.line)
+            if first != row.line:
+                problems.append(f"roll {roll_no} is repeated (line {first})")
+
+        action, message = "new", None
+        if not problems and roll_no.lower() in existing:
+            roll, code = existing[roll_no.lower()]
+            if code.strip().lower() != color.lower():
+                problems.append(f"roll {roll_no} already belongs to color {code}")
+            else:
+                changes = {k: getattr(row, k) for k in _IMPORT_FIELDS
+                           if getattr(roll, k) is None or abs(float(getattr(roll, k)) - float(getattr(row, k))) > 1e-9}
+                action = "update" if changes else "unchanged"
+                message = ", ".join(k.replace("_", " ") for k in changes) or None
+                plan.append((action, roll, changes))
+        elif not problems:
+            if color.lower() not in colors:
+                new_colors.setdefault(color.lower(), color)
+            plan.append(("new", color.lower(), row))
+
+        if problems:
+            action, message = "error", "; ".join(problems)
+        counts[action] += 1
+        lines.append(schemas.RollImportLine(line=row.line, color=color, roll_no=roll_no, action=action, message=message))
+
+    result = dict(new_colors=list(new_colors.values()), new_rolls=counts["new"], updated_rolls=counts["update"],
+                  unchanged_rolls=counts["unchanged"], errors=counts["error"], lines=lines)
+    if payload.dry_run or counts["error"]:
+        return schemas.RollImportResult(applied=False, **result)
+
+    for key, name in new_colors.items():
+        colors[key] = models.PlmColor(plm_id=plm_id, colour_code=name)
+        db.add(colors[key])
+    db.flush()
+    touched = set()
+    for action, target, data in plan:
+        if action == "new":
+            color = colors[target]
+            db.add(models.PlmRoll(plm_color_id=color.id, roll_no=data.roll_no.strip(),
+                                  **{k: getattr(data, k) for k in _IMPORT_FIELDS}))
+            touched.add(color.id)
+        elif action == "update":
+            for k, v in data.items():
+                setattr(target, k, v)
+            touched.add(target.plm_color_id)
+    db.flush()
+    for color in colors.values():
+        if color.id in touched:
+            _sync_color_quantity(db, color)
+    record_audit(db, user, action="rolls_imported", entity_type="plm", entity_id=plm.id, plm_id=plm.id,
+                 summary=f"PLM {plm.plm_code}: imported {counts['new']} new, {counts['update']} updated roll(s)"
+                         + (f", new colors {', '.join(new_colors.values())}" if new_colors else ""))
+    db.commit()
+    return schemas.RollImportResult(applied=True, **result)
+
+
 @router.patch("/rolls/{roll_id}", response_model=schemas.PlmRollOut)
-def update_roll(roll_id: UUID, payload: schemas.PlmRollUpdate, db: Session = Depends(get_db), user: CurrentUser = Depends(require_roles("inspection"))):
+def update_roll(roll_id: UUID, payload: schemas.PlmRollUpdate, db: Session = Depends(get_db), user: CurrentUser = Depends(require_admin())):
     roll = db.query(models.PlmRoll).get(roll_id)
     if not roll:
         raise HTTPException(status_code=404, detail="Roll not found")
@@ -416,6 +511,16 @@ def list_plms(
     if not ids:
         return []
     loaded = {plm.id: plm for plm in _plm_query(db, lite=lite).filter(models.Plm.id.in_(ids)).all()}
+    if lite:
+        counts = dict(
+            db.query(models.PlmColor.plm_id, func.count(models.PlmRoll.id))
+            .join(models.PlmRoll, models.PlmRoll.plm_color_id == models.PlmColor.id)
+            .filter(models.PlmColor.plm_id.in_(ids))
+            .group_by(models.PlmColor.plm_id)
+            .all()
+        )
+        for plm in loaded.values():
+            plm.roll_count = int(counts.get(plm.id, 0))
     return [apply_live_material(loaded[i]) for i in ids if i in loaded]
 
 
@@ -426,20 +531,118 @@ def _schedule_query(db: Session):
     )
 
 
+SCHEDULE_STATUSES = ("pending", "in_progress", "completed")
+OPEN_SCHEDULE_STATUSES = ("pending", "in_progress")
+
+
+def _clean_text(value: Optional[str]) -> Optional[str]:
+    value = (value or "").strip()
+    return value or None
+
+
+def _attach_schedule_progress(db: Session, rows):
+    """Planned rolls vs rolls with a 4-point entry, per PLM, in two grouped queries."""
+    from app.features.fabric_inspection.models import FabricInspectionReport, FabricInspectionRoll
+
+    rows = [r for r in rows if r is not None]
+    plm_ids = {r.plm_id for r in rows}
+    if not plm_ids:
+        return rows
+    totals = dict(
+        db.query(models.PlmColor.plm_id, func.count(models.PlmRoll.id))
+        .join(models.PlmRoll, models.PlmRoll.plm_color_id == models.PlmColor.id)
+        .filter(models.PlmColor.plm_id.in_(plm_ids))
+        .group_by(models.PlmColor.plm_id)
+        .all()
+    )
+    inspected = dict(
+        db.query(FabricInspectionReport.plm_id, func.count(func.distinct(FabricInspectionRoll.roll_no)))
+        .join(FabricInspectionRoll, FabricInspectionRoll.report_id == FabricInspectionReport.id)
+        .join(models.PlmColor, models.PlmColor.plm_id == FabricInspectionReport.plm_id)
+        .join(models.PlmRoll, (models.PlmRoll.plm_color_id == models.PlmColor.id)
+              & (models.PlmRoll.roll_no == FabricInspectionRoll.roll_no))
+        .filter(FabricInspectionReport.plm_id.in_(plm_ids))
+        .group_by(FabricInspectionReport.plm_id)
+        .all()
+    )
+    for r in rows:
+        r.total_rolls = int(totals.get(r.plm_id, 0))
+        r.inspected_rolls = int(inspected.get(r.plm_id, 0))
+    return rows
+
+
+def _one_schedule(db: Session, schedule_id) -> models.InspectionSchedule:
+    row = _schedule_query(db).get(schedule_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    _attach_schedule_progress(db, [row])
+    return row
+
+
+def _ensure_no_other_open_schedule(db: Session, plm: models.Plm, exclude_id=None):
+    q = db.query(models.InspectionSchedule).filter(
+        models.InspectionSchedule.plm_id == plm.id,
+        models.InspectionSchedule.status.in_(OPEN_SCHEDULE_STATUSES),
+    )
+    if exclude_id is not None:
+        q = q.filter(models.InspectionSchedule.id != exclude_id)
+    other = q.first()
+    if other:
+        raise HTTPException(
+            status_code=409,
+            detail=f"PLM {plm.plm_code} already has an open schedule on {other.scheduled_date.strftime('%d-%m-%Y')}. "
+                   f"Reschedule or complete that one instead.",
+        )
+
+
+def _ensure_not_past(day: date):
+    if day < factory_today():
+        raise HTTPException(status_code=422, detail="Schedule date cannot be in the past")
+
+
 # Keep static /schedules routes ABOVE /{plm_id} so route matching is unambiguous.
 @router.post("/schedules", response_model=schemas.InspectionScheduleOut)
 def create_schedule(payload: schemas.InspectionScheduleIn, db: Session = Depends(get_db), user: CurrentUser = Depends(require_roles("inspection"))):
     plm = db.query(models.Plm).get(payload.plm_id)
     if not plm:
         raise HTTPException(status_code=404, detail="PLM not found")
-    row = models.InspectionSchedule(**payload.model_dump())
+    _ensure_not_past(payload.scheduled_date)
+    _ensure_no_other_open_schedule(db, plm)
+    row = models.InspectionSchedule(
+        plm_id=plm.id,
+        scheduled_date=payload.scheduled_date,
+        status="pending",
+        assigned_to=_clean_text(payload.assigned_to),
+        machine_note=_clean_text(payload.machine_note),
+    )
     stamp_creator(row, user)
     db.add(row)
     db.flush()
     record_audit(db, user, action="schedule_created", entity_type="inspection_schedule", entity_id=row.id, plm_id=plm.id,
-                 summary=f"Schedule for {plm.plm_code} on {payload.scheduled_date.isoformat()}")
+                 summary=f"Schedule for {plm.plm_code} on {payload.scheduled_date.isoformat()}"
+                         + (f" (assigned to {row.assigned_to})" if row.assigned_to else ""))
     db.commit()
-    return _schedule_query(db).get(row.id)
+    return _one_schedule(db, row.id)
+
+
+@router.get("/schedules/assignees", response_model=List[schemas.ScheduleAssignee])
+def schedule_assignees(db: Session = Depends(get_db), _: CurrentUser = Depends(require_roles("inspection"))):
+    """Labels of active floor access codes, offered as 'assign to' choices."""
+    from app.features.auth.models import AccessCode
+
+    rows = (
+        db.query(AccessCode.label, AccessCode.role)
+        .filter(AccessCode.is_active.is_(True), AccessCode.role.in_(("worker", "inspection")))
+        .order_by(AccessCode.role, AccessCode.label)
+        .all()
+    )
+    seen, out = set(), []
+    for label, role in rows:
+        key = (label or "").strip().lower()
+        if key and key not in seen:
+            seen.add(key)
+            out.append(schemas.ScheduleAssignee(label=label.strip(), role=str(getattr(role, "value", role))))
+    return out
 
 
 @router.get("/schedules/list", response_model=List[schemas.InspectionScheduleOut])
@@ -468,7 +671,7 @@ def list_schedules(
             models.Plm.plm_code.ilike(f"%{q.strip()}%")
         )
     query = query.order_by(models.InspectionSchedule.scheduled_date, models.InspectionSchedule.created_at)
-    return paginate(query, response, limit, offset, default=2000, maximum=2000).all()
+    return _attach_schedule_progress(db, paginate(query, response, limit, offset, default=2000, maximum=2000).all())
 
 
 @router.delete("/schedules/{schedule_id}", status_code=204)
@@ -489,16 +692,17 @@ def update_schedule_status(schedule_id: UUID, payload: schemas.ScheduleStatusUpd
         raise HTTPException(status_code=404, detail="Schedule not found")
     if user.role == "worker" and not user.is_admin and payload.status != "in_progress":
         raise HTTPException(status_code=403, detail="Workers can only start a scheduled inspection")
-    if payload.status not in ("pending", "in_progress", "completed"):
+    if payload.status not in SCHEDULE_STATUSES:
         raise HTTPException(status_code=422, detail="status must be pending, in_progress, or completed")
     before = row.status
+    if before == "completed" and payload.status in OPEN_SCHEDULE_STATUSES:
+        _ensure_no_other_open_schedule(db, row.plm, exclude_id=row.id)
     row.status = payload.status
     if before != payload.status:
         record_audit(db, user, action="schedule_status", entity_type="inspection_schedule", entity_id=row.id, plm_id=row.plm_id,
                      summary=f"Schedule {row.plm_code}: {before} -> {payload.status}")
     db.commit()
-    db.refresh(row)
-    return row
+    return _one_schedule(db, row.id)
 
 
 @router.patch("/schedules/{schedule_id}/reschedule", response_model=schemas.InspectionScheduleOut)
@@ -506,14 +710,31 @@ def reschedule(schedule_id: UUID, payload: schemas.ScheduleRescheduleUpdate, db:
     row = _schedule_query(db).get(schedule_id)
     if not row:
         raise HTTPException(status_code=404, detail="Schedule not found")
+    if row.status == "completed":
+        raise HTTPException(status_code=409, detail="A completed schedule cannot be rescheduled")
+    _ensure_not_past(payload.scheduled_date)
     before = row.scheduled_date
     row.scheduled_date = payload.scheduled_date
-    row.status = "pending"
     record_audit(db, user, action="schedule_rescheduled", entity_type="inspection_schedule", entity_id=row.id, plm_id=row.plm_id,
                  summary=f"Schedule {row.plm_code}: {before.isoformat()} -> {payload.scheduled_date.isoformat()}")
     db.commit()
-    db.refresh(row)
-    return row
+    return _one_schedule(db, row.id)
+
+
+@router.patch("/schedules/{schedule_id}/assign", response_model=schemas.InspectionScheduleOut)
+def assign_schedule(schedule_id: UUID, payload: schemas.ScheduleAssignUpdate, db: Session = Depends(get_db), user: CurrentUser = Depends(require_roles("inspection"))):
+    row = _schedule_query(db).get(schedule_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    before = (row.assigned_to, row.machine_note)
+    row.assigned_to = _clean_text(payload.assigned_to)
+    row.machine_note = _clean_text(payload.machine_note)
+    if before != (row.assigned_to, row.machine_note):
+        record_audit(db, user, action="schedule_assigned", entity_type="inspection_schedule", entity_id=row.id, plm_id=row.plm_id,
+                     summary=f"Schedule {row.plm_code}: assigned to {row.assigned_to or '-'}"
+                             + (f", table {row.machine_note}" if row.machine_note else ""))
+    db.commit()
+    return _one_schedule(db, row.id)
 
 
 @router.get("/{plm_id}", response_model=schemas.PlmOut)

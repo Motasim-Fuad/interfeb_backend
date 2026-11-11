@@ -6,6 +6,7 @@ import urllib.request
 from datetime import date, datetime
 from io import BytesIO
 from html import escape
+from types import SimpleNamespace
 from typing import Iterable
 
 from reportlab.lib import colors
@@ -343,19 +344,56 @@ def _photo_inner(col_w, n_rows):
     return inner_w, inner_h
 
 
+def _image_from_url(url, max_w=28*mm, max_h=20*mm):
+    """Load a defect photo from its stored URL (local /media file, else remote)."""
+    url = (url or '').strip()
+    if not url:
+        return None
+    key = url
+    if '/media/' in url.replace('\\', '/'):
+        key = url.replace('\\', '/').split('/media/', 1)[-1].split('?', 1)[0]
+    elif url.startswith('http'):
+        key = None
+    att = SimpleNamespace(storage_key=key, file_url=url)
+    return _image_from_att(att, max_w, max_h)
+
+
+def _compress_image(source, max_w, max_h):
+    """Downsample camera photos so PDFs stay emailable; display size stays max_w x max_h."""
+    try:
+        from PIL import Image as PILImage
+    except Exception:
+        return None
+    try:
+        im = PILImage.open(source if not isinstance(source, BytesIO) else BytesIO(source.getvalue()))
+        im = im.convert("RGB")
+        max_px = max(160, int(max(float(max_w), float(max_h)) / 72.0 * 150))
+        im.thumbnail((max_px, max_px))
+        out = BytesIO()
+        im.save(out, format="JPEG", quality=72, optimize=True)
+        out.seek(0)
+        return out, im.size
+    except Exception:
+        return None
+
+
 def _image_from_att(att: Attachment, max_w=28*mm, max_h=20*mm):
     source = _image_source(att)
     if source is None:
         return None
     try:
-        if isinstance(source, BytesIO):
-            payload = source.getvalue()
-            reader = ImageReader(BytesIO(payload))
-            img_input = BytesIO(payload)
+        packed = _compress_image(source, max_w, max_h)
+        if packed:
+            img_input, (iw, ih) = packed
         else:
-            reader = ImageReader(source)
-            img_input = source
-        iw, ih = reader.getSize()
+            if isinstance(source, BytesIO):
+                payload = source.getvalue()
+                reader = ImageReader(BytesIO(payload))
+                img_input = BytesIO(payload)
+            else:
+                reader = ImageReader(source)
+                img_input = source
+            iw, ih = reader.getSize()
         if not iw or not ih:
             return None
         ratio = min(max_w / float(iw), max_h / float(ih), 1)
@@ -704,7 +742,6 @@ def _fabric_inspection(db, plm):
         color_codes=colors_text,
         extra_meta=info,
         landscape_page=True,
-        overview=_overview(r.is_pass for r in report.rolls),
     )
     pagew = landscape(A4)[0] - 16*mm
     fixed = [16, 22, 14, 14, 16, 16]
@@ -751,7 +788,74 @@ def _fabric_inspection(db, plm):
                   _table(loc_rows, widths=[22*mm, 20*mm, 18*mm, pagew - 150*mm, 40*mm, 18*mm, 32*mm], header_rows=1, font=6.2)]
         if len(located) > 400:
             story += [_p(f'{len(located) - 400} more located defects not shown.', LABEL)]
+    story += _defect_photo_evidence(report, pagew)
     return story, True
+
+
+_PHOTO_EVIDENCE_CAP = 48
+
+
+def _defect_photo_evidence(report, pagew):
+    """Appendix of 4-point defect photos — same PDF, last pages, printable with the score sheet."""
+    shots = [(r, d) for r in report.rolls for d in (r.defects or []) if (d.photo_url or '').strip()]
+    if not shots:
+        return []
+    shots.sort(key=lambda rd: (rd[0].roll_no or '', float(rd[1].position_yard) if rd[1].position_yard is not None else 1e9))
+    unit = (report.quantity_unit_snapshot or 'yds').upper()
+    shown = shots[:_PHOTO_EVIDENCE_CAP]
+    cols = 4
+    cell_w = pagew / cols
+    inner = min(46*mm, cell_w - 10*mm)
+    cap_style = ParagraphStyle('evcap', parent=SMALL, fontName='Helvetica', fontSize=6.2, leading=8, alignment=TA_CENTER)
+    tiles = []
+    for r, d in shown:
+        img = _image_from_url(d.photo_url, inner, inner)
+        photo = _ClippedPhoto(img, inner, inner) if img is not None else _p('Image unavailable', SMALL)
+        pos = _fmt(d.position_yard)
+        side = (d.side or '').title()
+        bits = [r.roll_no or '', d.defect_type_name or '', d.range_label or '']
+        loc = ' '.join(x for x in (pos and f'{pos} {unit}', side) if x)
+        if loc:
+            bits.append(loc)
+        caption = _p('  ·  '.join(b for b in bits if b), cap_style)
+        tile = Table([[photo], [caption]], colWidths=[cell_w], rowHeights=[inner + 6, 12*mm])
+        tile.setStyle(TableStyle([
+            ('BOX', (0, 0), (-1, -1), 0.5, LINE),
+            ('BACKGROUND', (0, 0), (-1, -1), PAPER),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (0, 0), 'MIDDLE'),
+            ('VALIGN', (0, 1), (0, 1), 'TOP'),
+            ('LEFTPADDING', (0, 0), (-1, -1), 4),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+            ('TOPPADDING', (0, 0), (0, 0), 4),
+            ('BOTTOMPADDING', (0, 0), (0, 0), 2),
+            ('TOPPADDING', (0, 1), (0, 1), 2),
+            ('BOTTOMPADDING', (0, 1), (0, 1), 4),
+        ]))
+        tiles.append(tile)
+    while len(tiles) % cols:
+        tiles.append('')
+    grid_rows = [tiles[i:i + cols] for i in range(0, len(tiles), cols)]
+    grid = Table(grid_rows, colWidths=[cell_w] * cols)
+    grid.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 2),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 2),
+        ('TOPPADDING', (0, 0), (-1, -1), 2),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+    ]))
+    extra = []
+    if len(shots) > _PHOTO_EVIDENCE_CAP:
+        extra = [_p(f'{len(shots) - _PHOTO_EVIDENCE_CAP} additional photos not printed.', LABEL)]
+    return [
+        PageBreak(),
+        _section_title('DEFECT PHOTO EVIDENCE', landscape_page=True),
+        Spacer(1, 2*mm),
+        _p('Photographs captured during 4-point inspection. Print with the score sheet.', SMALL),
+        Spacer(1, 3*mm),
+        grid,
+        *extra,
+    ]
 
 
 def _gsm(db, plm):

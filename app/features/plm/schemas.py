@@ -43,6 +43,39 @@ class PlmRollBulkCreate(BaseModel):
         return self
 
 
+class RollImportRow(BaseModel):
+    line: int
+    color: str = Field(default="", max_length=120)
+    roll_no: str = Field(default="", max_length=60)
+    marked_width: Optional[float] = None
+    marked_length: Optional[float] = None
+    planned_quantity: Optional[float] = None
+    supplier_total_point: Optional[float] = None
+
+
+class RollImportIn(BaseModel):
+    rows: List[RollImportRow] = Field(min_length=1, max_length=5000)
+    dry_run: bool = True
+
+
+class RollImportLine(BaseModel):
+    line: int
+    color: str
+    roll_no: str
+    action: str  # new | update | unchanged | error
+    message: Optional[str] = None
+
+
+class RollImportResult(BaseModel):
+    applied: bool
+    new_colors: List[str]
+    new_rolls: int
+    updated_rolls: int
+    unchanged_rolls: int
+    errors: int
+    lines: List[RollImportLine]
+
+
 class PlmColorIn(BaseModel):
     colour_code: str
     planned_quantity: Optional[float] = None
@@ -97,6 +130,8 @@ class PlmOut(BaseModel):
     qc_config: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
     qc_setup_version: int = 1
     colors: List[PlmColorOut] = Field(default_factory=list)
+    # Only filled on lite lists, where colors/rolls are not loaded.
+    roll_count: Optional[int] = None
     created_at: datetime
     class Config: from_attributes = True
 
@@ -104,17 +139,30 @@ class PlmOut(BaseModel):
 class InspectionScheduleIn(BaseModel):
     plm_id: UUID
     scheduled_date: date
-    status: str = "pending"
-    assigned_to: Optional[str] = None
-    machine_note: Optional[str] = None
+    assigned_to: Optional[str] = Field(default=None, max_length=120)
+    machine_note: Optional[str] = Field(default=None, max_length=300)
 
 
 class InspectionScheduleOut(InspectionScheduleIn):
     id: UUID
+    status: str
     plm_code: Optional[str] = None
     buyer_name: Optional[str] = None
     supplier_name: Optional[str] = None
+    # Planned rolls under the PLM vs. rolls that already have a 4-point entry.
+    total_rolls: int = 0
+    inspected_rolls: int = 0
     class Config: from_attributes = True
+
+
+class ScheduleAssignUpdate(BaseModel):
+    assigned_to: Optional[str] = Field(default=None, max_length=120)
+    machine_note: Optional[str] = Field(default=None, max_length=300)
+
+
+class ScheduleAssignee(BaseModel):
+    label: str
+    role: str
 
 
 class ScheduleStatusUpdate(BaseModel):
