@@ -730,11 +730,15 @@ def _fabric_inspection(db, plm):
             r.total_points, _fmt(r.percent_points), _fmt(pts_yds), r.remarks or '',
         ])
     colors_text = _plm_colors(plm, [r.colour_code for r in report.rolls] + [report.color] + list(planned.values()))
+    # Planned check qty when set, otherwise the length actually inspected.
+    checked_qty = report.checked_qty if report.checked_qty is not None else (
+        sum(float(r.length_actual) for r in report.rolls if r.length_actual is not None) or None)
     info = _table([
-        ['Received Qty', f'{_fmt(report.received_qty)} {report.quantity_unit_snapshot.upper()}', 'Inspection Check Qty', f'{_fmt(report.checked_qty)} {report.quantity_unit_snapshot.upper()}'],
+        ['Received Qty', f'{_fmt(report.received_qty)} {report.quantity_unit_snapshot.upper()}', 'Inspection Check Qty', f'{_fmt(checked_qty)} {report.quantity_unit_snapshot.upper()}'],
         ['Fabric Type', report.fabric_type or '', 'Fabric Composition', report.fabric_composition or ''],
         ['Individual Accepted', f'{_fmt(report.individual_standard_snapshot)}%', 'Average Accepted', f'{_fmt(report.average_standard_snapshot)}%'],
-        ['In-house Date', _date(report.fabric_in_house_date), 'Inspection Date', _date(report.inspection_date)],
+        # In-house Date is already in the page header above.
+        ['Inspection Date', _date(report.inspection_date), 'Rolls Inspected', len(report.rolls)],
     ], widths=[32*mm, 68*mm, 38*mm, 62*mm], header_rows=0, font=7.5)
     story = _header_story(
         'FABRICS INSPECTION REPORT — 4 POINTS SYSTEM',
@@ -925,7 +929,7 @@ def _moisture(db, plm):
     info = _table([
         ['Composition Standard', standard_label, 'Acceptance', f'{_fmt(r.acceptance_snapshot)}%'],
         ['Vendor', r.vendor or '', 'Factory', r.factory or 'Interfab Shirt Mfg. Ltd.'],
-        ['Date', moisture_date, 'In-house Date', _first_date(getattr(plm, 'received_at', None), getattr(plm, 'plm_date', None))],
+        ['Date', moisture_date, 'Total Roll', len(r.rolls)],
     ], widths=[34*mm, 63*mm, 28*mm, 69*mm], header_rows=0, font=7.5)
     acc = float(r.acceptance_snapshot) if r.acceptance_snapshot is not None else None
     flags = []
@@ -971,7 +975,7 @@ def _skew(db, plm):
     codes = _plm_colors(plm, [x.colour_code for x in r.rolls] + list(planned.values()))
     info = _table([
         ['Receive Qty', f'{_fmt(r.receive_qty)} {r.quantity_unit_snapshot.upper()}', 'Total Roll', r.total_roll or '', 'Fabric Construction', r.fabric_construction or ''],
-        ['In-house Date', _first_date(r.in_house_date, getattr(plm, 'received_at', None), getattr(plm, 'plm_date', None)), 'STD', f'{_fmt(std)}%' if std is not None else '', 'Date', _first_date(r.report_date, r.in_house_date, getattr(plm, 'plm_date', None))],
+        ['STD', f'{_fmt(std)}%' if std is not None else '', 'Date', _first_date(r.report_date, r.in_house_date, getattr(plm, 'plm_date', None)), 'Unit', (r.measurement_unit_snapshot or '').upper()],
     ], widths=[28*mm, 36*mm, 25*mm, 25*mm, 35*mm, 45*mm], header_rows=0, font=7.5)
     flags = []
     for x in r.rolls:
@@ -1337,3 +1341,9 @@ def build_report_pdf(db: Session, module: str, plm_id) -> bytes:
     doc = _doc(buffer, landscape_page=is_landscape)
     doc.build(story)
     return buffer.getvalue()
+
+
+# Paper-form layouts (TIDEWATER sample pack) replace the generic layouts above.
+from app.features.report_export import paper_forms as _paper_forms  # noqa: E402
+
+BUILDERS.update(_paper_forms.BUILDERS)
