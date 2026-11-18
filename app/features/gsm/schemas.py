@@ -30,7 +30,14 @@ class ReportCreate(BaseModel):
     plm_id: UUID
     report_date: Optional[date] = None
     color: Optional[str] = None
+    standard_gsm: Optional[float] = None  # Required GSM entered in the app
+    # Accepted GSM tolerance (%) entered in the app.
+    tolerance_percent: Optional[float] = None
+
+
+class ReportUpdate(BaseModel):
     standard_gsm: Optional[float] = None
+    tolerance_percent: Optional[float] = None
 
 
 class ReportOut(BaseModel):

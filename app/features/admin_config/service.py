@@ -160,16 +160,12 @@ def apply_live_material(plm: Any) -> Any:
 def push_material_standards(db: Session, material: models.Material) -> None:
     """Write current Material numbers onto every PLM (and open reports) that uses it."""
     from app.features.plm.models import Plm
-    from app.features.gsm.models import GsmCheckReport
     from app.features.moisture.models import MoistureCheckReport
-    from app.features.skew_bowing.models import SkewBowingReport
+
+    from app.core.moisture_limits import material_moisture_limit
 
     snap = material_snapshot(material)
-    std_gsm = parse_optional_float(material.gsm_expected)
-    gsm_tol = parse_optional_float(material.gsm_tolerance)
-    moisture = parse_optional_float(material.accepted_moisture)
-    skew_std = parse_optional_float(material.width_tolerance)
-    width_label = (material.fabric_width_expected or "").strip()
+    moisture = material_moisture_limit(material)
 
     plms = db.query(Plm).filter(Plm.material_id == material.id).all()
     for plm in plms:
@@ -179,56 +175,28 @@ def push_material_standards(db: Session, material: models.Material) -> None:
             plm.fabric_composition = material.composition_label
         if material.fabric_name:
             plm.fabric_type = material.fabric_name
-        if std_gsm is not None or gsm_tol is not None:
-            for report in db.query(GsmCheckReport).filter(GsmCheckReport.plm_id == plm.id).all():
-                if std_gsm is not None:
-                    report.standard_gsm = std_gsm
-                if gsm_tol is not None:
-                    report.tolerance_snapshot = gsm_tol
+        # GSM (required + tolerance) and the Skew STD are entered in the app; only moisture is pushed.
         if moisture is not None:
             for report in db.query(MoistureCheckReport).filter(MoistureCheckReport.plm_id == plm.id).all():
                 report.acceptance_snapshot = moisture
-        if skew_std is not None or width_label:
-            for report in db.query(SkewBowingReport).filter(SkewBowingReport.plm_id == plm.id).all():
-                if skew_std is not None:
-                    report.standard_point_snapshot = skew_std
-                if width_label:
-                    report.fabric_width_label_snapshot = width_label
 
 
 def apply_material_to_qc(qc: Dict[str, Any], material: models.Material) -> Dict[str, Any]:
-    """Copy construction/appearance numbers from Materials into the PLM qc_config snapshot.
+    """Copy the accepted moisture from Materials into the PLM qc_config snapshot.
 
-    Inspection modules still read gsm/moisture/skew from qc_config. Dashboard no longer
-    collects those modules on Supplier QC Profile / consignment setup.
+    Required GSM, GSM tolerance and the Skew & Bowing STD are entered in the app.
     """
     result = deepcopy(qc or {})
 
-    gsm = dict(result.get("gsm") or {})
-    standard_gsm = parse_optional_float(material.gsm_expected)
-    tolerance = parse_optional_float(material.gsm_tolerance)
-    if standard_gsm is not None:
-        gsm["standard_gsm"] = standard_gsm
-    if tolerance is not None:
-        gsm["tolerance_percent"] = tolerance
-    result["gsm"] = gsm
+    from app.core.moisture_limits import material_moisture_limit
 
     moisture = dict(result.get("moisture") or {})
     if material.composition_label:
         moisture["standard_label"] = material.composition_label
-    accepted = parse_optional_float(material.accepted_moisture)
+    accepted = material_moisture_limit(material)
     if accepted is not None:
         moisture["acceptance_percentage"] = accepted
     result["moisture"] = moisture
-
-    skew = dict(result.get("skew_bowing") or {})
-    width_label = (material.fabric_width_expected or "").strip()
-    if width_label:
-        skew["width_label"] = width_label
-    standard_point = parse_optional_float(material.width_tolerance)
-    if standard_point is not None:
-        skew["standard_point"] = standard_point
-    result["skew_bowing"] = skew
 
     relaxation = dict(result.get("relaxation") or {})
     if relaxation.get("relaxation_hours") in (None, ""):
@@ -245,3 +213,34 @@ def deep_merge(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]
         else:
             result[key] = deepcopy(value)
     return result
+
+
+def push_supplier_unit(db: Session, supplier: models.Supplier) -> None:
+    """Supplier owns inch/cm: a changed default reaches its consignments, PLMs and reports,
+    and stored 4-point scores are recalculated with the new unit."""
+    from app.features.store.models import FabricReceive
+    from app.features.plm.models import Plm
+    from app.features.fabric_inspection.models import FabricInspectionReport
+    from app.features.fabric_inspection.service import recalculate_roll
+    from app.features.skew_bowing.models import SkewBowingReport
+    from app.features.correlation.models import FabricCorrelationReport
+
+    unit = (supplier.default_measurement_unit or "").strip().lower()
+    if unit not in ("inch", "cm"):
+        return
+    for receive in db.query(FabricReceive).filter(FabricReceive.supplier_id == supplier.id).all():
+        receive.measurement_unit = unit
+    plm_ids = []
+    for plm in db.query(Plm).filter(Plm.supplier_id == supplier.id).all():
+        plm.measurement_unit = unit
+        plm_ids.append(plm.id)
+    if not plm_ids:
+        return
+    for model in (SkewBowingReport, FabricCorrelationReport):
+        for report in db.query(model).filter(model.plm_id.in_(plm_ids)).all():
+            report.measurement_unit_snapshot = unit
+    for report in db.query(FabricInspectionReport).filter(FabricInspectionReport.plm_id.in_(plm_ids)).all():
+        report.measurement_unit_snapshot = unit
+        std = float(report.individual_standard_snapshot) if report.individual_standard_snapshot is not None else None
+        for roll in report.rolls:
+            recalculate_roll(db, roll, std, unit, report.quantity_unit_snapshot)

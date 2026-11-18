@@ -971,49 +971,63 @@ def _skew(db, plm):
     codes = _plm_colors(plm, [x.colour_code for x in r.rolls] + list(planned.values()))
     info = _table([
         ['Receive Qty', f'{_fmt(r.receive_qty)} {r.quantity_unit_snapshot.upper()}', 'Total Roll', r.total_roll or '', 'Fabric Construction', r.fabric_construction or ''],
-        ['In-house Date', _first_date(r.in_house_date, getattr(plm, 'received_at', None), getattr(plm, 'plm_date', None)), 'Fabric Width Standard', r.fabric_width_label_snapshot or '', 'Fabric Type', 'STRIPE' if r.is_stripe else 'SOLID'],
-        ['Acceptance', f'{_fmt(std)} {r.measurement_unit_snapshot.upper()}', 'Date', _first_date(r.report_date, r.in_house_date, getattr(plm, 'plm_date', None)), '', ''],
+        ['In-house Date', _first_date(r.in_house_date, getattr(plm, 'received_at', None), getattr(plm, 'plm_date', None)), 'STD', f'{_fmt(std)}%' if std is not None else '', 'Date', _first_date(r.report_date, r.in_house_date, getattr(plm, 'plm_date', None))],
     ], widths=[28*mm, 36*mm, 25*mm, 25*mm, 35*mm, 45*mm], header_rows=0, font=7.5)
-    extra = info
     flags = []
     for x in r.rolls:
-        for ac, bd in ((x.ac_value_before, x.bd_value_before), (x.ac_value_after, x.bd_value_after)):
-            if ac is None or bd is None:
-                continue
-            amount = abs(float(ac) - float(bd))
-            flags.append(amount <= std if std is not None else None)
+        for pct in (skew_service.roll_before_percent(x), skew_service.roll_after_percent(x)):
+            if pct is not None:
+                flags.append(skew_service.roll_is_pass(pct, std))
     swatches = [
         ('Before Wash', _stage_photo(db, 'skew_before_wash', r.id, fallback_types=('skew_bowing_report',), fallback_roll_type='skew_bowing_roll', roll_ids=[x.id for x in r.rolls])),
         ('After Wash', _stage_photo(db, 'skew_after_wash', r.id)),
     ]
-    story = _header_story('Skew & Bowing Check Report', plm, color_codes=codes, extra_meta=extra, overview=_overview(flags), swatches=swatches)
+    story = _header_story('Skew & Bowing Check Report', plm, color_codes=codes, extra_meta=info, overview=_overview(flags), swatches=swatches)
 
-    def section(title, after=False):
-        data = [['Roll No', 'Color', 'AC', 'BD', '|AC-BD|', 'AC+BD', 'Skew %', 'Date', 'Result']]
-        rows = []
-        for x in r.rolls:
-            ac = x.ac_value_after if after else x.ac_value_before
-            bd = x.bd_value_after if after else x.bd_value_before
-            if ac is None and bd is None:
-                continue
-            rows.append(x)
+    def result(pct):
+        passed = skew_service.roll_is_pass(pct, std)
+        return 'PASS' if passed else 'FAIL' if passed is False else ''
+
+    def before_section():
+        data = [['Roll No', 'Color', 'Length', 'Measurement Variation', 'Result %', 'STD %', 'Date', 'Pass/Fail']]
+        rows = [x for x in r.rolls if skew_service.roll_before_percent(x) is not None
+                or x.length_before is not None or x.variation_before is not None]
         for x in rows:
-            ac = x.ac_value_after if after else x.ac_value_before
-            bd = x.bd_value_after if after else x.bd_value_before
-            pct = skew_service.skew_percent(ac, bd, None, r.measurement_unit_snapshot)
-            amount = abs(float(ac) - float(bd)) if ac is not None and bd is not None else None
-            total = float(ac) + float(bd) if ac is not None and bd is not None else None
-            passed = amount <= std if amount is not None and std is not None else None
-            data.append([x.roll_no, _color_chip(_color_for(plm, x.roll_no, x.colour_code, planned)), _fmt(ac), _fmt(bd), _fmt(amount), _fmt(total), f'{_fmt(pct)}%', _roll_date(x, after=after, report=r, plm=plm), 'PASS' if passed else 'FAIL' if passed is False else ''])
+            pct = skew_service.roll_before_percent(x)
+            data.append([x.roll_no, _color_chip(_color_for(plm, x.roll_no, x.colour_code, planned)), _fmt(x.length_before), _fmt(x.variation_before),
+                         f'{_fmt(pct)}%' if pct is not None else '', _fmt(std), _roll_date(x, report=r, plm=plm), result(pct)])
         if rows:
-            avg = stats['avg_percent_after' if after else 'avg_percent_before']
-            data.append(['AVG', '', '', '', '', '', f'{_fmt(avg)}%' if avg is not None else '', '', ''])
+            avg = stats['avg_percent_before']
+            data.append(['AVG', '', '', '', f'{_fmt(avg)}%' if avg is not None else '', '', '', ''])
         else:
-            data.append(['—', '', '', '', '', '', '', '', 'No data'])
-        widths = _fit_col_widths([16, 24, 14, 14, 18, 16, 18, 22, 20], _page_content_width())
-        return KeepTogether([_section_title(title), Spacer(1, 1.5*mm), _table(data, widths=widths, header_rows=1, font=6.8)])
+            data.append(['—', '', '', '', '', '', '', 'No data'])
+        widths = _fit_col_widths([16, 24, 18, 26, 18, 16, 22, 20], _page_content_width())
+        note = _p('Result % = Measurement Variation ÷ Length × 100', CELL)
+        return KeepTogether([_section_title('BEFORE WASH'), Spacer(1, 1.5*mm), _table(data, widths=widths, header_rows=1, font=6.8), Spacer(1, 1*mm), note])
 
-    story += [section('BEFORE WASH', False), Spacer(1, 4*mm), section('AFTER WASH', True)]
+    def after_section():
+        data = [['Roll No', 'Color', 'AC', 'BD', 'AC-BD', 'AC+BD', 'Result %', 'STD %', 'Date', 'Pass/Fail']]
+        rows = [x for x in r.rolls if x.ac_value_after is not None or x.bd_value_after is not None]
+        for x in rows:
+            ac, bd = x.ac_value_after, x.bd_value_after
+            pct = skew_service.roll_after_percent(x)
+            diff = float(ac) - float(bd) if ac is not None and bd is not None else None
+            total = float(ac) + float(bd) if ac is not None and bd is not None else None
+            data.append([x.roll_no, _color_chip(_color_for(plm, x.roll_no, x.colour_code, planned)), _fmt(ac), _fmt(bd), _fmt(diff), _fmt(total),
+                         f'{_fmt(pct)}%' if pct is not None else '', _fmt(std), _roll_date(x, after=True, report=r, plm=plm), result(pct)])
+        if rows:
+            avg = stats['avg_percent_after']
+            data.append(['AVG', '', '', '', '', '', f'{_fmt(avg)}%' if avg is not None else '', '', '', ''])
+        else:
+            data.append(['—', '', '', '', '', '', '', '', '', 'No data'])
+        widths = _fit_col_widths([16, 22, 13, 13, 14, 15, 17, 14, 20, 18], _page_content_width())
+        note = _p('Result % = 2 × (AC − BD) ÷ (AC + BD) × 100', CELL)
+        return KeepTogether([_section_title('AFTER WASH'), Spacer(1, 1.5*mm), _table(data, widths=widths, header_rows=1, font=6.8), Spacer(1, 1*mm), note])
+
+    acceptance = [['Acceptance', '', ''], ['Fabric Width', 'Solids', 'Stripes']] + [list(row) for row in skew_service.ACCEPTANCE_TABLE]
+    acceptance_table = _table(acceptance, widths=[40*mm, 40*mm, 40*mm], header_rows=2, font=7.5, spans=[('SPAN', (0, 0), (2, 0))])
+
+    story += [before_section(), Spacer(1, 4*mm), after_section(), Spacer(1, 4*mm), KeepTogether([acceptance_table])]
     return story, False
 
 
@@ -1145,8 +1159,9 @@ def _continuity(db, plm):
     if not r:
         return None
     codes = _plm_colors(plm, list(_planned_color_map(plm).values()))
-    story = _header_story('Master Color Continuity Card', plm, color_codes=codes, overview=_overview([None] * len(r.rolls)))
-    data = [['Roll No', 'Before Wash / Non Wash Shade', 'After Wash Shade', f'Qty ({_qty_unit(plm)})']]
+    swatches = [('Card Image', _stage_photo(db, 'color_continuity_card', r.id))]
+    story = _header_story('Master Color Continuity Card', plm, color_codes=codes, overview=_overview([None] * len(r.rolls)), swatches=swatches)
+    data = [['Roll No', 'Before Wash / Non Wash Shade', 'After Wash Shade', f'Quantity ({_qty_unit(plm)})']]
     for x in r.rolls:
         data.append([x.roll_no, x.shade_group_before or '', x.shade_group_after or '', _fmt(x.yardage)])
     story += [_table(data, widths=[32*mm, 62*mm, 62*mm, 38*mm], header_rows=1, font=8)]

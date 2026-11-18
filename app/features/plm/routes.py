@@ -51,8 +51,6 @@ def _validate_allocation(db: Session, receive: FabricReceive, quantity: Optional
 
 
 def _validate_planning_payload(payload: schemas.PlmCreate, receive: FabricReceive) -> None:
-    if receive.qc_setup_status != "finalized":
-        raise HTTPException(status_code=422, detail="Finalize the consignment QC setup in Admin Dashboard before creating PLMs")
     if payload.allocated_quantity is None or float(payload.allocated_quantity) <= 0:
         raise HTTPException(status_code=422, detail="PLM allocated_quantity must be greater than zero")
 
@@ -73,8 +71,9 @@ def _validate_planning_payload(payload: schemas.PlmCreate, receive: FabricReceiv
                 missing.append("marked width")
             if roll.marked_length is None or float(roll.marked_length) <= 0:
                 missing.append("marked length")
-            if roll.planned_quantity is None or float(roll.planned_quantity) <= 0:
-                missing.append("planned quantity")
+            # Roll quantity is entered in the app (Color Continuity), not planned here.
+            if roll.planned_quantity is not None and float(roll.planned_quantity) <= 0:
+                missing.append("planned quantity must be greater than 0")
             if roll.supplier_total_point is None:
                 missing.append("supplier total point")
             elif float(roll.supplier_total_point) < 0:
@@ -84,7 +83,7 @@ def _validate_planning_payload(payload: schemas.PlmCreate, receive: FabricReceiv
                     status_code=422,
                     detail=f"Roll {roll.roll_no} under {color.colour_code} is missing/invalid: {', '.join(missing)}",
                 )
-            roll_total += float(roll.planned_quantity)
+            roll_total += float(roll.planned_quantity or 0)
         if roll_total > float(color.planned_quantity) + 1e-9:
             raise HTTPException(
                 status_code=422,
@@ -118,8 +117,8 @@ def _require_roll_fields(roll: schemas.PlmRollIn) -> None:
         missing.append("marked width")
     if roll.marked_length is None or float(roll.marked_length) <= 0:
         missing.append("marked length")
-    if roll.planned_quantity is None or float(roll.planned_quantity) <= 0:
-        missing.append("roll quantity")
+    if roll.planned_quantity is not None and float(roll.planned_quantity) <= 0:
+        missing.append("roll quantity must be greater than 0")
     if roll.supplier_total_point is None:
         missing.append("supplier total point")
     elif float(roll.supplier_total_point) < 0:
@@ -229,8 +228,23 @@ def update_plm(plm_id: UUID, payload: schemas.PlmUpdate, db: Session = Depends(g
     if payload.allocated_quantity is not None and plm.fabric_receive:
         _validate_allocation(db, plm.fabric_receive, payload.allocated_quantity, exclude_plm_id=plm.id)
     changes = payload.model_dump(exclude_none=True)
+    if "plm_code" in changes:
+        code = changes["plm_code"].strip()
+        if not code:
+            raise HTTPException(status_code=422, detail="PLM code cannot be empty")
+        if db.query(models.Plm).filter(models.Plm.plm_code == code, models.Plm.id != plm.id).first():
+            raise HTTPException(status_code=400, detail="A PLM with this code already exists")
+        changes["plm_code"] = code
+    material = None
+    if "material_id" in changes:
+        material = db.query(Material).filter(Material.id == changes["material_id"], Material.is_active == True).first()  # noqa: E712
+        if not material:
+            raise HTTPException(status_code=422, detail="Select an active Material from Dashboard")
     for k, v in changes.items():
         setattr(plm, k, v)
+    if material is not None:
+        plm.material = material
+        apply_live_material(plm)
     record_audit(db, user, action="plm_updated", entity_type="plm", entity_id=plm.id, plm_id=plm.id,
                  summary=f"PLM {plm.plm_code} updated: {', '.join(changes) or 'no changes'}",
                  data={k: str(v) for k, v in changes.items()})
@@ -329,10 +343,10 @@ def bulk_add_rolls(color_id: UUID, payload: schemas.PlmRollBulkCreate, db: Sessi
                 row.supplier_total_point = payload.supplier_total_point
         else:
             if (payload.marked_width is None or payload.marked_width <= 0 or payload.marked_length is None or payload.marked_length <= 0 or
-                    payload.planned_quantity is None or payload.planned_quantity <= 0 or payload.supplier_total_point is None or payload.supplier_total_point < 0):
+                    (payload.planned_quantity is not None and payload.planned_quantity <= 0) or payload.supplier_total_point is None or payload.supplier_total_point < 0):
                 raise HTTPException(
                     status_code=422,
-                    detail=f"New roll {roll_no} requires marked_width, marked_length, planned_quantity and supplier_total_point (>= 0) from Dashboard",
+                    detail=f"New roll {roll_no} requires marked_width, marked_length and supplier_total_point (>= 0) from Dashboard",
                 )
             row = models.PlmRoll(
                 plm_color_id=color_id,
@@ -386,7 +400,7 @@ def import_rolls(plm_id: UUID, payload: schemas.RollImportIn, db: Session = Depe
             problems.append("roll number is required")
         for key, label in (("marked_width", "marked width"), ("marked_length", "marked length"), ("planned_quantity", "quantity")):
             value = getattr(row, key)
-            if value is None or value <= 0:
+            if (value is None and key != "planned_quantity") or (value is not None and value <= 0):
                 problems.append(f"{label} must be greater than 0")
         if row.supplier_total_point is None or row.supplier_total_point < 0:
             problems.append("supplier points must be 0 or more")
@@ -402,7 +416,8 @@ def import_rolls(plm_id: UUID, payload: schemas.RollImportIn, db: Session = Depe
                 problems.append(f"roll {roll_no} already belongs to color {code}")
             else:
                 changes = {k: getattr(row, k) for k in _IMPORT_FIELDS
-                           if getattr(roll, k) is None or abs(float(getattr(roll, k)) - float(getattr(row, k))) > 1e-9}
+                           if getattr(row, k) is not None
+                           and (getattr(roll, k) is None or abs(float(getattr(roll, k)) - float(getattr(row, k))) > 1e-9)}
                 action = "update" if changes else "unchanged"
                 message = ", ".join(k.replace("_", " ") for k in changes) or None
                 plan.append((action, roll, changes))

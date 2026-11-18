@@ -40,6 +40,10 @@ class SkewBowingRoll(Base, BaseEntity):
     roll_no = Column(String, nullable=False)
     colour_code = Column(String, nullable=True)
 
+    # Before wash: length + measurement variation -> variation / length x 100
+    length_before = Column(Numeric, nullable=True)
+    variation_before = Column(Numeric, nullable=True)
+    # Legacy before-wash AC/BD (older rolls only); after wash keeps AC/BD.
     ac_value_before = Column(Numeric, nullable=True)
     bd_value_before = Column(Numeric, nullable=True)
     ac_value_after = Column(Numeric, nullable=True)

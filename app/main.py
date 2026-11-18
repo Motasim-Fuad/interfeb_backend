@@ -28,6 +28,7 @@ from app.features.color_continuity.routes import router as color_continuity_rout
 from app.features.factory_report.routes import router as factory_report_router
 from app.features.inspection_report.routes import router as inspection_report_router
 from app.features.analytics.routes import router as analytics_router
+from app.features.analytics.hierarchy import router as analytics_hierarchy_router
 from app.features.report_export.routes import router as report_export_router
 from app.features.audit.routes import router as audit_router
 from app.features.assistant.routes import router as assistant_router
@@ -83,7 +84,7 @@ for feature_router in (
     admin_config_router, plm_router, store_router, attachments_router, roll_lock_router,
     fabric_inspection_router, gsm_router, moisture_router, skew_bowing_router, relaxation_router,
     shade_check_router, shrinkage_router, correlation_router, color_continuity_router,
-    factory_report_router, inspection_report_router, analytics_router, report_export_router,
+    factory_report_router, inspection_report_router, analytics_router, analytics_hierarchy_router, report_export_router,
     audit_router, assistant_router,
 ):
     app.include_router(feature_router, dependencies=_authenticated)

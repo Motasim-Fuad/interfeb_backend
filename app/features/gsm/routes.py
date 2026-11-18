@@ -12,8 +12,6 @@ from app.features.plm.models import Plm
 from app.features.gsm import models, schemas, service
 from app.features.inspection_report.service import upsert_inspection_report
 from app.features.attachments.service import attach_photos_bulk, attach_stage_photos, get_attachments
-from app.features.store.service import require_qc_float
-from app.features.admin_config.service import parse_optional_float
 from app.core.roll_payload import merge_roll_fields, require_before_wash_first, stamp_wash_dates
 from app.core.clock import factory_today
 
@@ -24,14 +22,7 @@ def _attach_photos(db, roll):
     roll.attachments = get_attachments(db, "gsm_roll", roll.id); return roll
 
 def _hydrate(db, report):
-    plm = db.query(Plm).options(joinedload(Plm.material)).get(report.plm_id)
-    if plm and plm.material:
-        std = parse_optional_float(plm.material.gsm_expected)
-        tol = parse_optional_float(plm.material.gsm_tolerance)
-        if std is not None:
-            report.standard_gsm = std
-        if tol is not None:
-            report.tolerance_snapshot = tol
+    # Required GSM and tolerance % are both entered in the app (stored on the report).
     attach_photos_bulk(db, "gsm_roll", report.rolls)
     attach_stage_photos(db, report, before_type="gsm_before_wash", after_type="gsm_after_wash")
     return _attach_stats(report)
@@ -47,9 +38,15 @@ def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), 
     plm=db.query(Plm).get(payload.plm_id)
     if not plm: raise HTTPException(status_code=404, detail="PLM not found")
     existing=db.query(models.GsmCheckReport).options(joinedload(models.GsmCheckReport.rolls)).filter(models.GsmCheckReport.plm_id==plm.id).first()
-    if existing: return _hydrate(db, existing)
-    standard_gsm,_=require_qc_float(db,plm,"gsm","standard_gsm")
-    tolerance,tolerance_id=require_qc_float(db,plm,"gsm","tolerance_percent",legacy_standard_module="gsm")
+    if existing:
+        if payload.tolerance_percent is not None:
+            existing.tolerance_snapshot=payload.tolerance_percent
+        if payload.standard_gsm is not None:
+            existing.standard_gsm=payload.standard_gsm
+        db.commit(); db.refresh(existing)
+        return _hydrate(db, existing)
+    standard_gsm=payload.standard_gsm
+    tolerance,tolerance_id=payload.tolerance_percent,None
     color = payload.color or ', '.join(c.colour_code for c in (plm.colors or []) if c.colour_code) or None
     report=models.GsmCheckReport(plm_id=plm.id,report_date=payload.report_date or factory_today(),color=color,standard_gsm=standard_gsm,tolerance_standard_id=tolerance_id,tolerance_snapshot=tolerance)
     db.add(report); db.commit(); db.refresh(report); return _hydrate(db, report)
@@ -67,6 +64,19 @@ def list_reports(response: Response, plm_id: Optional[UUID] = None, limit: Optio
 def get_report(report_id:UUID,db:Session=Depends(get_db)):
     r=db.query(models.GsmCheckReport).options(joinedload(models.GsmCheckReport.rolls)).get(report_id)
     if not r:raise HTTPException(status_code=404,detail="Report not found")
+    return _hydrate(db, r)
+
+@router.patch("/{report_id}", response_model=schemas.ReportOut)
+def update_report(report_id:UUID,payload:schemas.ReportUpdate,db:Session=Depends(get_db),_=Depends(require_roles("inspection","worker"))):
+    r=db.query(models.GsmCheckReport).options(joinedload(models.GsmCheckReport.rolls)).get(report_id)
+    if not r:raise HTTPException(status_code=404,detail="Report not found")
+    if payload.tolerance_percent is not None:
+        if payload.tolerance_percent<0:raise HTTPException(status_code=422,detail="Tolerance cannot be negative")
+        r.tolerance_snapshot=payload.tolerance_percent
+    if payload.standard_gsm is not None:
+        if payload.standard_gsm<=0:raise HTTPException(status_code=422,detail="Required GSM must be greater than 0")
+        r.standard_gsm=payload.standard_gsm
+    db.commit();db.refresh(r)
     return _hydrate(db, r)
 
 @router.post("/{report_id}/rolls", response_model=schemas.RollOut)

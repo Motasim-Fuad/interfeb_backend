@@ -16,8 +16,6 @@ class FabricReceiveCreate(BaseModel):
     measurement_unit: Optional[str] = None  # compatibility only; backend always derives it from supplier
     received_at: Optional[date] = None
     qc_config: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
-    qc_setup_status: str = "draft"
-    notes: Optional[str] = None
 
     @field_validator("measurement_unit")
     @classmethod
@@ -33,12 +31,6 @@ class FabricReceiveCreate(BaseModel):
             raise ValueError("quantity_unit must be 'yds' or 'meter'")
         return value
 
-    @field_validator("qc_setup_status")
-    @classmethod
-    def validate_status(cls, value):
-        if value not in ("draft", "finalized"):
-            raise ValueError("qc_setup_status must be draft or finalized")
-        return value
 
 
 class FabricReceiveUpdate(BaseModel):
@@ -53,8 +45,6 @@ class FabricReceiveUpdate(BaseModel):
     measurement_unit: Optional[str] = None
     received_at: Optional[date] = None
     qc_config: Optional[Dict[str, Dict[str, Any]]] = None
-    qc_setup_status: Optional[str] = None
-    notes: Optional[str] = None
 
     @field_validator("measurement_unit")
     @classmethod
@@ -70,12 +60,6 @@ class FabricReceiveUpdate(BaseModel):
             raise ValueError("quantity_unit must be 'yds' or 'meter'")
         return value
 
-    @field_validator("qc_setup_status")
-    @classmethod
-    def validate_status(cls, value):
-        if value is not None and value not in ("draft", "finalized"):
-            raise ValueError("qc_setup_status must be draft or finalized")
-        return value
 
 
 class FabricReceiveOut(FabricReceiveCreate):

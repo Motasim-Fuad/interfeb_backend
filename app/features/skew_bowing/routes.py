@@ -12,22 +12,14 @@ from app.features.skew_bowing import models, schemas, service
 from app.features.inspection_report.service import upsert_inspection_report
 from app.features.attachments.service import attach_photos_bulk, attach_stage_photos, get_attachments
 from app.features.plm.models import Plm
-from app.features.store.service import resolve_qc_float, get_qc_value
-from app.features.admin_config.service import parse_optional_float
+from app.features.store.service import get_qc_value
 from app.core.roll_payload import merge_roll_fields, require_before_wash_first, stamp_wash_dates
 from app.core.clock import factory_today
 
 router=APIRouter(prefix="/skew-bowing",tags=["Skew & Bowing"])
 
 def _attach(db,report):
-    plm=db.query(Plm).options(joinedload(Plm.material)).get(report.plm_id)
-    if plm and plm.material:
-        std_live=parse_optional_float(plm.material.width_tolerance)
-        width_live=(plm.material.fabric_width_expected or "").strip()
-        if std_live is not None:
-            report.standard_point_snapshot=std_live
-        if width_live:
-            report.fabric_width_label_snapshot=width_live
+    # STD comes from the app (report.standard_point_snapshot), not from Materials.
     report.attachments=get_attachments(db,"skew_bowing_report",report.id)
     attach_stage_photos(db, report, before_type="skew_before_wash", after_type="skew_after_wash")
     std=float(report.standard_point_snapshot) if report.standard_point_snapshot is not None else None
@@ -43,8 +35,11 @@ def create_report(payload:schemas.ReportCreate,db:Session=Depends(get_db),_=Depe
     plm=db.query(Plm).get(payload.plm_id)
     if not plm:raise HTTPException(status_code=404,detail="PLM not found")
     existing=db.query(models.SkewBowingReport).options(joinedload(models.SkewBowingReport.rolls)).filter(models.SkewBowingReport.plm_id==plm.id).first()
-    if existing:return _attach(db,existing)
-    std,_=resolve_qc_float(db,plm,"skew_bowing","standard_point")
+    if existing:
+        if payload.standard_point is not None:
+            existing.standard_point_snapshot=payload.standard_point;db.commit();db.refresh(existing)
+        return _attach(db,existing)
+    std=payload.standard_point
     is_stripe=bool(get_qc_value(plm,"skew_bowing","is_stripe",payload.is_stripe))
     legacy_width_id=None
     total_roll=sum(len(c.rolls) for c in plm.colors)
@@ -75,6 +70,18 @@ def get_report(report_id:UUID,db:Session=Depends(get_db)):
     if not r:raise HTTPException(status_code=404,detail="Report not found")
     return _attach(db,r)
 
+@router.patch("/{report_id}",response_model=schemas.ReportOut)
+def update_report(report_id:UUID,payload:schemas.ReportUpdate,db:Session=Depends(get_db),_=Depends(require_roles("inspection","worker"))):
+    report=db.query(models.SkewBowingReport).options(joinedload(models.SkewBowingReport.rolls)).get(report_id)
+    if not report:raise HTTPException(status_code=404,detail="Report not found")
+    if payload.standard_point is not None:
+        if payload.standard_point<0:raise HTTPException(status_code=422,detail="STD cannot be negative")
+        report.standard_point_snapshot=payload.standard_point
+    if payload.comments_action_plan is not None:
+        report.comments_action_plan=payload.comments_action_plan
+    db.commit();db.refresh(report)
+    return _attach(db,report)
+
 @router.post("/{report_id}/rolls",response_model=schemas.RollOut)
 @retry_on_conflict
 def upsert_roll(report_id:UUID,payload:schemas.RollIn,response:Response,db:Session=Depends(get_db),_=Depends(require_roles("inspection","worker"))):
@@ -84,14 +91,15 @@ def upsert_roll(report_id:UUID,payload:schemas.RollIn,response:Response,db:Sessi
     if not plm:raise HTTPException(status_code=404,detail="PLM not found")
     data=payload.model_dump()
     data["client_updated_at"]=client_stamp(payload.client_updated_at)
-    # Percentage is derived only from AC/BD; no hidden reference length is needed.
     data["reference_fabric_length"]=None
+    if data.get("length_before") is not None and float(data["length_before"])<=0:
+        raise HTTPException(status_code=422,detail="Length must be greater than 0")
     roll=db.query(models.SkewBowingRoll).filter(models.SkewBowingRoll.report_id==report_id,models.SkewBowingRoll.roll_no==payload.roll_no).first()
     if is_stale(roll,payload.client_updated_at):
         mark_stale(response)
     else:
-        require_before_wash_first(roll, data, ("ac_value_before","bd_value_before"), ("ac_value_after","bd_value_after"))
-        stamp_wash_dates(roll, data, ("ac_value_before","bd_value_before"), ("ac_value_after","bd_value_after"))
+        require_before_wash_first(roll, data, ("length_before","variation_before","ac_value_before","bd_value_before"), ("ac_value_after","bd_value_after"))
+        stamp_wash_dates(roll, data, ("length_before","variation_before"), ("ac_value_after","bd_value_after"))
         if roll:
             merge_roll_fields(roll, data)
         else:

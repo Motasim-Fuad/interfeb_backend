@@ -10,6 +10,8 @@ class RollIn(BaseModel):
     roll_no: str
     client_updated_at: Optional[datetime] = None
     colour_code: Optional[str] = None
+    length_before: Optional[float] = None
+    variation_before: Optional[float] = None
     ac_value_before: Optional[float] = None
     bd_value_before: Optional[float] = None
     ac_value_after: Optional[float] = None
@@ -39,6 +41,13 @@ class ReportCreate(BaseModel):
     in_house_date: Optional[date] = None
     fabric_width_standard_id: Optional[UUID] = None
     is_stripe: bool = False
+    comments_action_plan: Optional[str] = None
+    # STD entered in the app; one value used for both Before and After wash.
+    standard_point: Optional[float] = None
+
+
+class ReportUpdate(BaseModel):
+    standard_point: Optional[float] = None
     comments_action_plan: Optional[str] = None
 
 

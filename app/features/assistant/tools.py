@@ -163,7 +163,7 @@ def tool_overview(db: Session, a: dict, lang: str) -> Reply:
         act_dataset(tr(lang, "Failed rolls", "ফেল রোলগুলো"), "rolls", dict(base, is_pass=False)) if k["failed"] else None,
         act_prompt(tr(lang, "Top defects", "শীর্ষ ত্রুটি"), tr(lang, "top defects", "কোন ডিফেক্ট বেশি")),
         act_prompt(tr(lang, "Supplier scorecard", "সাপ্লায়ার স্কোর"), "supplier scorecard"),
-        act_nav(tr(lang, "Open Quality Insights", "কোয়ালিটি ইনসাইট খুলুন"), "/quality"),
+        act_nav(tr(lang, "Open Analysis Report", "অ্যানালাইসিস রিপোর্ট খুলুন"), "/analytics"),
     ]))
     return Reply(text, blocks, [tr(lang, "Show failed rolls this month", "এই মাসের ফেল রোল দাও"),
                                 tr(lang, "Pass rate trend", "পাস রেট ট্রেন্ড"), tr(lang, "Today's schedule", "আজকের সিডিউল")])

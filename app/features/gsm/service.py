@@ -2,13 +2,12 @@
 Mirrors the calculation logic that used to live in Flutter's GSMCheckReportEntity getters
 (avgActualGsmBefore, minGsmBefore, avgOverLessBeforePct, passBefore, etc.) - now computed
 once here so the Flutter app, the future Admin Dashboard, and anyone else consuming this API
-all get the same numbers instead of each re-implementing the math (and the tolerance snapshot is resolved from the finalized Dashboard QC setup).
+all get the same numbers instead of each re-implementing the math. The tolerance % is entered
+in the app; without it there is no PASS/FAIL.
 """
 from typing import List
 
 from app.features.gsm.models import GsmCheckRoll
-
-DEFAULT_TOLERANCE_PCT = 5.0  # compatibility fallback; finalized consignments should always snapshot the Dashboard value
 
 
 def over_less_pct(actual: float, standard: float) -> float:
@@ -18,7 +17,7 @@ def over_less_pct(actual: float, standard: float) -> float:
 
 
 def compute_report_stats(rolls: List[GsmCheckRoll], standard_gsm: float, tolerance_pct: float | None) -> dict:
-    tolerance = tolerance_pct if tolerance_pct is not None else DEFAULT_TOLERANCE_PCT
+    tolerance = tolerance_pct
 
     before_vals = [float(r.actual_gsm_before) for r in rolls if r.actual_gsm_before is not None]
     after_vals = [float(r.actual_gsm_after) for r in rolls if r.actual_gsm_after is not None]
@@ -45,6 +44,6 @@ def compute_report_stats(rolls: List[GsmCheckRoll], standard_gsm: float, toleran
         "max_gsm_after": max(after_vals) if after_vals else None,
         "avg_over_less_before_pct": avg_over_less_before_pct,
         "avg_over_less_after_pct": avg_over_less_after_pct,
-        "pass_before": abs(avg_over_less_before_pct) <= tolerance if avg_over_less_before_pct is not None else None,
-        "pass_after": abs(avg_over_less_after_pct) <= tolerance if avg_over_less_after_pct is not None else None,
+        "pass_before": abs(avg_over_less_before_pct) <= tolerance if avg_over_less_before_pct is not None and tolerance is not None else None,
+        "pass_after": abs(avg_over_less_after_pct) <= tolerance if avg_over_less_after_pct is not None and tolerance is not None else None,
     }

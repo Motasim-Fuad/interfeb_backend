@@ -10,11 +10,14 @@ from app.core.list_query import bound_unscoped
 from app.core.deps import require_roles
 from app.features.color_continuity import models, schemas
 from app.features.inspection_report.service import upsert_inspection_report
+from app.features.attachments.service import get_attachments
 
 router = APIRouter(prefix="/color-continuity", tags=["Color Continuity Card"])
 
 
-def _attach_totals(card: models.ColorContinuityCard):
+def _attach_totals(card: models.ColorContinuityCard, db: Optional[Session] = None):
+    if db is not None:
+        card.attachments = get_attachments(db, "color_continuity_card", card.id)
     card.total_roll = len(card.rolls)
     card.total_yardage = sum(float(r.yardage) for r in card.rolls if r.yardage is not None)
     return card
@@ -25,12 +28,12 @@ def _attach_totals(card: models.ColorContinuityCard):
 def create_card(payload: schemas.CardCreate, db: Session = Depends(get_db), _=Depends(require_roles("inspection"))):
     existing = db.query(models.ColorContinuityCard).options(joinedload(models.ColorContinuityCard.rolls)).filter(models.ColorContinuityCard.plm_id == payload.plm_id).first()
     if existing:
-        return _attach_totals(existing)
+        return _attach_totals(existing, db)
     card = models.ColorContinuityCard(**payload.model_dump())
     db.add(card)
     db.commit()
     db.refresh(card)
-    _attach_totals(card)
+    _attach_totals(card, db)
     return card
 
 
@@ -41,8 +44,16 @@ def list_cards(response: Response, plm_id: Optional[UUID] = None, limit: Optiona
         q = q.filter(models.ColorContinuityCard.plm_id == plm_id)
     cards = bound_unscoped(q.order_by(models.ColorContinuityCard.created_at.desc()), bool(plm_id), response, limit, offset).all()
     for card in cards:
-        _attach_totals(card)
+        _attach_totals(card, db)
     return cards
+
+
+@router.get("/{card_id}", response_model=schemas.CardOut)
+def get_card(card_id: UUID, db: Session = Depends(get_db)):
+    card = db.query(models.ColorContinuityCard).options(joinedload(models.ColorContinuityCard.rolls)).get(card_id)
+    if not card:
+        raise HTTPException(status_code=404, detail="Card not found")
+    return _attach_totals(card, db)
 
 
 @router.post("/{card_id}/rolls", response_model=schemas.RollOut)

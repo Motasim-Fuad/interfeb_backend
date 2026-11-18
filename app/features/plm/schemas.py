@@ -101,6 +101,8 @@ class PlmCreate(BaseModel):
 
 
 class PlmUpdate(BaseModel):
+    plm_code: Optional[str] = None
+    material_id: Optional[UUID] = None
     plm_date: Optional[date] = None
     plm_style: Optional[str] = None
     allocated_quantity: Optional[float] = None

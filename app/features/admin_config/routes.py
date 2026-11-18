@@ -110,12 +110,22 @@ def _normalize_supplier_profile_config(raw: dict) -> dict:
     return config
 
 
+def _fill_material_moisture(row) -> None:
+    """Blank Accepted Moisture on a Material = computed from its fibre composition."""
+    if isinstance(row, models.Material) and not (row.accepted_moisture or "").strip():
+        from app.core.moisture_limits import material_moisture_limit
+
+        value = material_moisture_limit(row)
+        row.accepted_moisture = f"{value:g}" if value is not None else None
+
+
 def register_crud(prefix: str, model: Type, schema_in, schema_out):
     sub = APIRouter(prefix=f"/{prefix}", tags=["Admin Config (dashboard-editable)"])
 
     @sub.post("", response_model=schema_out)
     def create(payload: schema_in, db: Session = Depends(get_db), _=Depends(require_admin())):
         row = model(**payload.model_dump())
+        _fill_material_moisture(row)
         db.add(row)
         db.commit()
         db.refresh(row)
@@ -147,9 +157,13 @@ def register_crud(prefix: str, model: Type, schema_in, schema_out):
             raise HTTPException(status_code=404, detail="Not found")
         for k, v in payload.model_dump().items():
             setattr(row, k, v)
+        _fill_material_moisture(row)
         if model is models.Material:
             from app.features.admin_config.service import push_material_standards
             push_material_standards(db, row)
+        if model is models.Supplier:
+            from app.features.admin_config.service import push_supplier_unit
+            push_supplier_unit(db, row)
         db.commit()
         db.refresh(row)
         return row

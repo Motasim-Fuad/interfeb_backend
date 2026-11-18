@@ -3,6 +3,8 @@ from typing import List, Optional
 from uuid import UUID
 from pydantic import BaseModel
 
+from app.features.attachments.schemas import AttachmentOut
+
 
 class RollIn(BaseModel):
     roll_no: str
@@ -30,4 +32,5 @@ class CardOut(BaseModel):
     rolls: List[RollOut] = []
     total_roll: int = 0
     total_yardage: float = 0
+    attachments: List[AttachmentOut] = []  # card image(s)
     class Config: from_attributes = True

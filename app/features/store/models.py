@@ -43,7 +43,7 @@ class FabricReceive(Base, BaseEntity):
     #  "fabric_inspection": {"individual_standard": 40, "average_standard": 40,
     #                        "checked_quantity": 500}}
     qc_config = Column(JSON, nullable=False, default=dict)
-    qc_setup_status = Column(String, nullable=False, default="draft")  # draft | finalized
+    qc_setup_status = Column(String, nullable=False, default="finalized")  # legacy; always finalized now
     qc_setup_version = Column(Integer, nullable=False, default=1)
     notes = Column(String, nullable=True)
 

@@ -39,19 +39,13 @@ def _changed(row: models.FabricReceive, key: str, value) -> bool:
 
 
 def _validate_finalized_setup(data: dict, current: models.FabricReceive | None = None) -> None:
-    """Prevent a 'finalized' consignment from silently missing planning data.
-
-    Drafts remain flexible.  Once finalized, the Dashboard must have supplied the
-    context that the factory app is intentionally forbidden from re-asking for.
+    """Every consignment is ready for PLMs once saved (no draft/finalized step), so the
+    Dashboard must always supply the context the factory app never re-asks for.
     """
     def effective(key, default=None):
         if key in data:
             return data[key]
         return getattr(current, key, default) if current is not None else default
-
-    status = effective("qc_setup_status", "draft")
-    if status != "finalized":
-        return
 
     missing_context = []
     for key, label in (
@@ -65,7 +59,7 @@ def _validate_finalized_setup(data: dict, current: models.FabricReceive | None =
             missing_context.append(label)
     qty = effective("received_quantity")
     if qty is not None and float(qty) <= 0:
-        raise HTTPException(status_code=422, detail="received_quantity must be greater than zero before QC setup is finalized")
+        raise HTTPException(status_code=422, detail="received_quantity must be greater than zero")
 
     qc = effective("qc_config", {}) or {}
     missing_qc = []
@@ -157,11 +151,12 @@ def create_fabric_receive(
     data = _normalize_payload(db, payload)
     _validate_finalized_setup(data)
     row = models.FabricReceive(**data)
+    row.qc_setup_status = "finalized"  # no draft step any more
     stamp_creator(row, user)
     db.add(row)
     db.flush()
     record_audit(db, user, action="fabric_receive_created", entity_type="fabric_receive", entity_id=row.id,
-                 summary=f"Consignment {row.consignment} received ({row.qc_setup_status or 'draft'})")
+                 summary=f"Consignment {row.consignment} received")
     db.commit()
     db.refresh(row)
     return row
@@ -209,7 +204,7 @@ def update_fabric_receive(
         setattr(row, key, value)
     if changed_keys:
         record_audit(db, user, action="fabric_receive_updated", entity_type="fabric_receive", entity_id=row.id,
-                     summary=f"Consignment {row.consignment} updated (v{row.qc_setup_version or 1}, {row.qc_setup_status}): "
+                     summary=f"Consignment {row.consignment} updated (v{row.qc_setup_version or 1}): "
                              + ", ".join(changed_keys))
     db.commit()
     db.refresh(row)

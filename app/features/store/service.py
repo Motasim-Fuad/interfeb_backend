@@ -78,6 +78,6 @@ def require_qc_float(db: Session, plm: Plm, module: str, key: str, *, legacy_sta
     if value is None:
         raise HTTPException(
             status_code=422,
-            detail=f"Missing Dashboard QC setup: {module}.{key}. Update/finalize the Fabric Receive first.",
+            detail=f"Missing Dashboard QC setup: {module}.{key}. Update the Fabric Receive first.",
         )
     return float(value), source_id
