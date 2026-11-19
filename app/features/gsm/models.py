@@ -14,7 +14,8 @@ class GsmCheckReport(Base, BaseEntity):
     plm_id = Column(UUID(as_uuid=True), ForeignKey("plms.id"), nullable=False, index=True)
     report_date = Column(Date, nullable=True)
     color = Column(String, nullable=True)
-    standard_gsm = Column(Numeric, nullable=True)
+    standard_gsm = Column(Numeric, nullable=True)  # Required GSM, before wash
+    standard_gsm_after = Column(Numeric, nullable=True)  # Required GSM, after wash (empty = same as before)
     tolerance_standard_id = Column(UUID(as_uuid=True), ForeignKey("acceptance_standards.id"), nullable=True)
     tolerance_snapshot = Column(Numeric, nullable=True)
 

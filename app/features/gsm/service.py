@@ -16,8 +16,15 @@ def over_less_pct(actual: float, standard: float) -> float:
     return ((actual - standard) / standard) * 100
 
 
-def compute_report_stats(rolls: List[GsmCheckRoll], standard_gsm: float, tolerance_pct: float | None) -> dict:
+def required_after(report) -> float:
+    """After-wash Required GSM; reports without one use the before-wash value."""
+    return float(report.standard_gsm_after or report.standard_gsm or 0)
+
+
+def compute_report_stats(rolls: List[GsmCheckRoll], standard_gsm: float, tolerance_pct: float | None,
+                         standard_gsm_after: float | None = None) -> dict:
     tolerance = tolerance_pct
+    standard_after = standard_gsm_after or standard_gsm
 
     before_vals = [float(r.actual_gsm_before) for r in rolls if r.actual_gsm_before is not None]
     after_vals = [float(r.actual_gsm_after) for r in rolls if r.actual_gsm_after is not None]
@@ -31,8 +38,8 @@ def compute_report_stats(rolls: List[GsmCheckRoll], standard_gsm: float, toleran
         if before_vals and standard_gsm else None
     )
     avg_over_less_after_pct = (
-        sum(over_less_pct(v, standard_gsm) for v in after_vals) / len(after_vals)
-        if after_vals and standard_gsm else None
+        sum(over_less_pct(v, standard_after) for v in after_vals) / len(after_vals)
+        if after_vals and standard_after else None
     )
 
     return {

@@ -488,6 +488,50 @@ def update_roll(roll_id: UUID, payload: schemas.PlmRollUpdate, db: Session = Dep
     return roll
 
 
+# QC report tables that point at a PLM, with the name shown when they block a delete.
+_PLM_REPORT_TABLES = [
+    ("fabric_inspection_reports", "4-Point inspection"), ("fabric_correlation_reports", "Correlation"),
+    ("skew_bowing_reports", "Skew & Bowing"), ("gsm_check_reports", "GSM"), ("moisture_check_reports", "Moisture"),
+    ("fabric_relaxation_reports", "Relaxation"), ("shade_check_reports", "Shade check"),
+    ("shrinkage_pattern_reports", "Shrinkage"), ("color_continuity_cards", "Color continuity"),
+    ("factory_reports", "Factory report"), ("inspection_reports", "Inspection report"),
+]
+
+
+def plm_report_names(db: Session, plm_ids: list) -> list[str]:
+    """Names of the QC reports already saved for these PLMs (empty = safe to delete)."""
+    if not plm_ids:
+        return []
+    from sqlalchemy import bindparam, text
+    found = []
+    for table, label in _PLM_REPORT_TABLES:
+        stmt = text(f"SELECT 1 FROM {table} WHERE plm_id IN :ids LIMIT 1").bindparams(bindparam("ids", expanding=True))
+        if db.execute(stmt, {"ids": list(plm_ids)}).first():
+            found.append(label)
+    return found
+
+
+@router.delete("/{plm_id}", status_code=204)
+def delete_plm(plm_id: UUID, db: Session = Depends(get_db), user: CurrentUser = Depends(require_admin())):
+    """Deletes a PLM with its colours, planned rolls and schedules. A PLM that already has QC
+    reports is kept, so no inspection result is ever lost."""
+    from app.features.attachments.models import Attachment
+
+    plm = db.query(models.Plm).get(plm_id)
+    if not plm:
+        raise HTTPException(status_code=404, detail="PLM not found")
+    reports = plm_report_names(db, [plm.id])
+    if reports:
+        raise HTTPException(status_code=409, detail=f"PLM {plm.plm_code} already has QC reports ({', '.join(reports)}), so it cannot be deleted.")
+    db.query(models.InspectionSchedule).filter(models.InspectionSchedule.plm_id == plm.id).delete(synchronize_session=False)
+    db.query(Attachment).filter(Attachment.owner_id == plm.id).delete(synchronize_session=False)
+    record_audit(db, user, action="plm_deleted", entity_type="plm", entity_id=plm.id, plm_id=plm.id,
+                 summary=f"PLM {plm.plm_code} deleted")
+    db.delete(plm)  # colours and planned rolls go with it (cascade)
+    db.commit()
+    return Response(status_code=204)
+
+
 @router.delete("/rolls/{roll_id}", status_code=204)
 def delete_roll(roll_id: UUID, db: Session = Depends(get_db), user: CurrentUser = Depends(require_admin())):
     """Removes a planned roll (e.g. a wrong line from a mill report). A roll the app has already

@@ -425,8 +425,9 @@ def gsm(db, plm):
         return None
     pw = _w(False)
     std = float(r.standard_gsm or 0)
+    std_after = gs.required_after(r)
     tol = float(r.tolerance_snapshot) if r.tolerance_snapshot is not None else None
-    stats = gs.compute_report_stats(r.rolls, std, tol)
+    stats = gs.compute_report_stats(r.rolls, std, tol, std_after)
     rolls = sorted(r.rolls, key=lambda x: x.created_at or 0)
     color = _colors(plm, [x.color for x in rolls] + [r.color])
 
@@ -441,13 +442,14 @@ def gsm(db, plm):
         ]
 
     def side(after):
+        req = std_after if after else std
         head = ['Roll No.', 'Require GSM', 'Actual GSM', 'Over/ Less %', 'Remarks']
         rows = [head]
         for x in rolls:
             actual = x.actual_gsm_after if after else x.actual_gsm_before
             if actual is None:
                 continue
-            rows.append([x.roll_no, S._fmt(std), S._fmt(actual), S._fmt(gs.over_less_pct(float(actual), std)),
+            rows.append([x.roll_no, S._fmt(req), S._fmt(actual), S._fmt(gs.over_less_pct(float(actual), req)),
                          (x.remarks_after if after else x.remarks_before) or ''])
         avg = stats['avg_over_less_after_pct' if after else 'avg_over_less_before_pct']
         ok = stats['pass_after' if after else 'pass_before']
@@ -467,7 +469,7 @@ def gsm(db, plm):
     for after in (False, True):
         photo = _photo(db, 'gsm_after_wash' if after else 'gsm_before_wash', r.id, (pw - 20*mm, 150*mm),
                        fallback_roll_type=None if after else 'gsm_roll', roll_ids=[x.id for x in rolls])
-        req = std
+        req = std_after if after else std
         band = _box([[_m('REQ GSM:', KVB), _m(S._fmt(req), KV)],
                      [_m(f'+{S._fmt(tol)}%=', KVB), _m(S._fmt(req * (1 + tol / 100)) if tol is not None else '', KV)],
                      [_m(f'-{S._fmt(tol)}%=', KVB), _m(S._fmt(req * (1 - tol / 100)) if tol is not None else '', KV)]],
@@ -547,29 +549,39 @@ def relaxation(db, plm):
     pw = _w(False)
     rolls = sorted(r.rolls, key=lambda x: x.created_at or 0)
     color = _colors(plm, [x.color_code for x in rolls] + [r.color])
-    hours = r.relaxation_hours_snapshot or 12
+    # Relaxation time is typed in the app for this fabric; blank = not printed.
+    hours = r.relaxation_hours_snapshot
     story = [_box([[_m('FABRIC RELAXATION REPORT', MID)]], [pw], cmds=[('ALIGN', (0, 0), (-1, -1), 'CENTER')]),
              _box([[_m(f'<b>BUYER:</b> {_buyer(plm)}', KV), _m(f'<b>STYLE/PLM:</b> {plm.plm_code}', KV),
                     _m(f'<b>COLOR:</b> {color}', KV), _m(f'<b>DATE:</b> {S._first_date(*[x.roll_date for x in rolls], plm.plm_date)}', KV)]],
                   [pw * 0.22, pw * 0.26, pw * 0.32, pw * 0.2])]
     h1 = ['FABRIC INFORMATION', '', '', 'BEFORE RELAXATION', '', '', 'AFTER RELAXATION', '', '', 'SHRINKAGE %', '', '']
     h2 = ['COLOR CODE', 'ROLL NO', f'FABRIC {S._qty_unit(plm)}', 'START TIME', 'LENGTH', 'WIDTH',
-          f'TIME AFTER {hours} HOURS', 'LENGTH', 'WIDTH', 'LENGTH', 'WIDTH', 'REMARK']
+          f'RELAXATION TIME AFTER {hours} HOURS' if hours else 'RELAXATION TIME', 'LENGTH', 'WIDTH', 'LENGTH', 'WIDTH', 'REMARK']
     rows = [h1, h2]
+
+    def pct(v):
+        return f'{S._fmt(v)}%' if v is not None else ''
+
+    # Paper layout: roll + before relaxation on the first line, then one line per reading.
     for x in rolls:
-        f = rs.compute_roll_fields(x)
-        rows.append([x.color_code or '', x.roll_no, S._fmt(x.fabric_yds_mtr), x.before_relax_start_time or '', S._fmt(x.before_relax_length),
-                     S._fmt(x.before_relax_width), x.after_relax_time or '', S._fmt(x.after_relax_length), S._fmt(x.after_relax_width),
-                     f'{S._fmt(f["shrinkage_length_pct"])}%' if f['shrinkage_length_pct'] is not None else '',
-                     f'{S._fmt(f["shrinkage_width_pct"])}%' if f['shrinkage_width_pct'] is not None else '', x.remark or ''])
-    for _ in range(max(0, 10 - len(rolls))):
+        reads = rs.readings(x) or [{}]
+        for i, rd in enumerate(reads):
+            first = i == 0
+            rows.append([(x.color_code or '') if first else '', x.roll_no if first else '', S._fmt(x.fabric_yds_mtr) if first else '',
+                         (x.before_relax_start_time or '') if first else '', S._fmt(x.before_relax_length) if first else '',
+                         S._fmt(x.before_relax_width) if first else '', rd.get('time') or '', S._fmt(rd.get('length')),
+                         S._fmt(rd.get('width')), pct(rd.get('shrinkage_length_pct')), pct(rd.get('shrinkage_width_pct')),
+                         (x.remark or '') if first else ''])
+    filled = len(rows) - 2
+    for _ in range(max(0, 14 - filled)):
         rows.append([''] * 12)
     story += [S._table(rows, widths=S._fit_col_widths([20, 14, 16, 16, 14, 14, 20, 14, 14, 15, 15, 18], pw), header_rows=2, font=6.6,
-                       row_heights=[None] * (len(rolls) + 2) + [6*mm] * (len(rows) - len(rolls) - 2),
+                       row_heights=[None] * (filled + 2) + [6*mm] * (len(rows) - filled - 2),
                        spans=[('SPAN', (0, 0), (2, 0)), ('SPAN', (3, 0), (5, 0)), ('SPAN', (6, 0), (8, 0)), ('SPAN', (9, 0), (11, 0))])]
     photo = _photo(db, 'relaxation_report', r.id, (pw - 60*mm, 45*mm), fallback_roll_type='relaxation_roll', roll_ids=[x.id for x in rolls])
     story += [_photo_box(photo, 'FABRIC SWATCH', (pw - 60*mm, 45*mm), pw),
-              _box([[_m(f'<b>COMMENTS</b><br/>RELAXATION TIME {hours} HOURS.' + (f'<br/>{r.comments}' if r.comments else ''), NOTE)]], [pw]),
+              _box([[_m('<b>COMMENTS</b>' + (f'<br/>RELAXATION TIME {hours} HOURS.' if hours else '') + (f'<br/>{r.comments}' if r.comments else ''), NOTE)]], [pw]),
               _signatures(['PO OFFICER', 'QA OFFICER', 'CUTTING MANAGER'], pw)]
     return story, False
 

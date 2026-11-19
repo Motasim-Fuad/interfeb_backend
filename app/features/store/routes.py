@@ -243,3 +243,20 @@ def get_fabric_receive(receive_id: UUID, db: Session = Depends(get_db)):
     if not row:
         raise HTTPException(status_code=404, detail="Fabric receive record not found")
     return row
+
+
+@router.delete("/{receive_id}", status_code=204)
+def delete_fabric_receive(receive_id: UUID, db: Session = Depends(get_db), user: CurrentUser = Depends(require_admin())):
+    """Deletes a consignment (fabric receive). Its PLMs must be deleted first, so a PLM and its
+    QC reports never lose their consignment."""
+    row = db.query(models.FabricReceive).get(receive_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Fabric receive record not found")
+    if row.plms:
+        codes = ", ".join(sorted(p.plm_code for p in row.plms)[:5])
+        raise HTTPException(status_code=409, detail=f"Consignment {row.consignment} still has PLM(s): {codes}. Delete those PLMs first.")
+    record_audit(db, user, action="fabric_receive_deleted", entity_type="fabric_receive", entity_id=row.id,
+                 summary=f"Consignment {row.consignment} deleted")
+    db.delete(row)
+    db.commit()
+    return Response(status_code=204)

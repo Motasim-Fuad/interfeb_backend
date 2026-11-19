@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import List, Optional
 from uuid import UUID
 from pydantic import BaseModel, field_validator
 
@@ -92,6 +92,24 @@ class DefectRangeConfigIn(BaseModel):
 class DefectRangeConfigOut(DefectRangeConfigIn):
     id: UUID
     class Config: from_attributes = True
+
+
+class DefectRangeRow(BaseModel):
+    """One range inside the combined Defect Type form. id = existing range being edited."""
+    id: Optional[UUID] = None
+    range_label: str
+    points: int
+
+
+class DefectTypeWithRangesIn(BaseModel):
+    name: str
+    sort_order: int = 0
+    is_active: bool = True
+    ranges: List[DefectRangeRow]
+
+
+class DefectTypeWithRangesOut(DefectTypeOut):
+    ranges: List[DefectRangeConfigOut]
 
 
 class AcceptanceStandardIn(BaseModel):

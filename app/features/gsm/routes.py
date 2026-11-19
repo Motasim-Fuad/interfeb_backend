@@ -28,7 +28,8 @@ def _hydrate(db, report):
     return _attach_stats(report)
 
 def _attach_stats(report):
-    stats = service.compute_report_stats(report.rolls, float(report.standard_gsm) if report.standard_gsm else 0, float(report.tolerance_snapshot) if report.tolerance_snapshot is not None else None)
+    stats = service.compute_report_stats(report.rolls, float(report.standard_gsm) if report.standard_gsm else 0, float(report.tolerance_snapshot) if report.tolerance_snapshot is not None else None,
+                                         service.required_after(report))
     for k,v in stats.items(): setattr(report,k,v)
     return report
 
@@ -43,12 +44,14 @@ def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), 
             existing.tolerance_snapshot=payload.tolerance_percent
         if payload.standard_gsm is not None:
             existing.standard_gsm=payload.standard_gsm
+        if payload.standard_gsm_after is not None:
+            existing.standard_gsm_after=payload.standard_gsm_after
         db.commit(); db.refresh(existing)
         return _hydrate(db, existing)
     standard_gsm=payload.standard_gsm
     tolerance,tolerance_id=payload.tolerance_percent,None
     color = payload.color or ', '.join(c.colour_code for c in (plm.colors or []) if c.colour_code) or None
-    report=models.GsmCheckReport(plm_id=plm.id,report_date=payload.report_date or factory_today(),color=color,standard_gsm=standard_gsm,tolerance_standard_id=tolerance_id,tolerance_snapshot=tolerance)
+    report=models.GsmCheckReport(plm_id=plm.id,report_date=payload.report_date or factory_today(),color=color,standard_gsm=standard_gsm,standard_gsm_after=payload.standard_gsm_after,tolerance_standard_id=tolerance_id,tolerance_snapshot=tolerance)
     db.add(report); db.commit(); db.refresh(report); return _hydrate(db, report)
 
 @router.get("", response_model=List[schemas.ReportOut])
@@ -76,6 +79,9 @@ def update_report(report_id:UUID,payload:schemas.ReportUpdate,db:Session=Depends
     if payload.standard_gsm is not None:
         if payload.standard_gsm<=0:raise HTTPException(status_code=422,detail="Required GSM must be greater than 0")
         r.standard_gsm=payload.standard_gsm
+    if payload.standard_gsm_after is not None:
+        if payload.standard_gsm_after<=0:raise HTTPException(status_code=422,detail="Required GSM (after wash) must be greater than 0")
+        r.standard_gsm_after=payload.standard_gsm_after
     db.commit();db.refresh(r)
     return _hydrate(db, r)
 

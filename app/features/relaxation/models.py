@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Numeric, Integer, Date, ForeignKey, UniqueConstraint, DateTime
+from sqlalchemy import JSON, Column, String, Numeric, Integer, Date, ForeignKey, UniqueConstraint, DateTime
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 
@@ -38,6 +38,9 @@ class FabricRelaxationRoll(Base, BaseEntity):
     after_relax_time = Column(String, nullable=True)
     after_relax_length = Column(Numeric, nullable=True)
     after_relax_width = Column(Numeric, nullable=True)
+    # Every after-relaxation reading in order: [{"time", "length", "width"}]. after_relax_*
+    # above always mirror the latest reading (used for averages and charts).
+    after_readings = Column(JSON, nullable=True)
     relaxation_hours = Column(Integer, nullable=True)
     remark = Column(String, nullable=True)
 

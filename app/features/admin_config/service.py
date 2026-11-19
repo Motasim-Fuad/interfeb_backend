@@ -197,11 +197,7 @@ def apply_material_to_qc(qc: Dict[str, Any], material: models.Material) -> Dict[
     if accepted is not None:
         moisture["acceptance_percentage"] = accepted
     result["moisture"] = moisture
-
-    relaxation = dict(result.get("relaxation") or {})
-    if relaxation.get("relaxation_hours") in (None, ""):
-        relaxation["relaxation_hours"] = 12
-    result["relaxation"] = relaxation
+    # Relaxation time depends on the fabric, so it is entered in the app (no fixed default).
     return result
 
 

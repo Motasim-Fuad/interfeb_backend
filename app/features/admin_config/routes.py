@@ -7,6 +7,7 @@ from typing import List, Type, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -146,7 +147,7 @@ def register_crud(prefix: str, model: Type, schema_in, schema_out):
         if supplier_id is not None and hasattr(model, "supplier_id"):
             query = query.filter(model.supplier_id == supplier_id)
         query = apply_text_search(query, model, q, ("name", "fabric_name", "fabric_code", "label", "primary_fiber", "dyeing_method"))
-        query = query.order_by(getattr(model, "sort_order", model.created_at))
+        query = query.order_by(getattr(model, "sort_order", model.created_at), model.created_at)
         query = apply_page(query, limit=limit, offset=offset)
         return query.all()
 
@@ -198,6 +199,75 @@ router.include_router(register_crud(
     "supplier-qc-profiles", models.SupplierQcProfile,
     schemas.SupplierQcProfileIn, schemas.SupplierQcProfileOut,
 ))
+def _active_ranges(db: Session, type_id) -> list:
+    return (db.query(models.DefectRangeConfig)
+            .filter(models.DefectRangeConfig.defect_type_id == type_id, models.DefectRangeConfig.is_active == True)  # noqa: E712
+            .order_by(models.DefectRangeConfig.sort_order, models.DefectRangeConfig.created_at).all())
+
+
+def _save_defect_type(db: Session, row: Optional[models.DefectType], payload: schemas.DefectTypeWithRangesIn) -> dict:
+    """Defect type + its 4-point ranges saved together (Dashboard -> Defect Types & Ranges).
+    Ranges left out of the list are deactivated, never hard-deleted, so old reports keep them."""
+    name = " ".join(payload.name.split())
+    if not name:
+        raise HTTPException(status_code=422, detail="Enter a defect type name.")
+    labels, ranges = set(), []
+    for r in payload.ranges:
+        label = " ".join(r.range_label.split())
+        if not label:
+            raise HTTPException(status_code=422, detail="Every range needs a label, e.g. 0-3.")
+        if label.lower() in labels:
+            raise HTTPException(status_code=422, detail=f"Range {label} is listed twice.")
+        if r.points < 0:
+            raise HTTPException(status_code=422, detail=f"Points for range {label} must be 0 or more.")
+        labels.add(label.lower())
+        ranges.append((r.id, label, r.points))
+    if not ranges:
+        raise HTTPException(status_code=422, detail="Add at least one range, e.g. 0-3 = 1 point.")
+    same = db.query(models.DefectType).filter(func.lower(models.DefectType.name) == name.lower())
+    if row is not None:
+        same = same.filter(models.DefectType.id != row.id)
+    clash = same.first()
+    if clash is not None and (row is not None or clash.is_active):
+        raise HTTPException(status_code=400, detail=f"Defect type {clash.name} already exists.")
+    if row is None:
+        row = clash or models.DefectType()  # re-adding a deleted name brings the old one back
+        if clash is None:
+            db.add(row)
+    row.name, row.sort_order, row.is_active = name, payload.sort_order, payload.is_active
+    db.flush()
+    existing = {r.id: r for r in db.query(models.DefectRangeConfig).filter(models.DefectRangeConfig.defect_type_id == row.id)}
+    by_label = {r.range_label.lower(): r for r in existing.values()}
+    kept = set()
+    for order, (rid, label, points) in enumerate(ranges, 1):
+        rng = existing.get(rid) or by_label.get(label.lower())
+        if rng is None:
+            rng = models.DefectRangeConfig(defect_type_id=row.id)
+            db.add(rng)
+        rng.range_label, rng.points, rng.sort_order, rng.is_active = label, points, order, True
+        db.flush()
+        kept.add(rng.id)
+    for rng in existing.values():
+        if rng.id not in kept:
+            rng.is_active = False
+    db.commit()
+    db.refresh(row)
+    return {**schemas.DefectTypeOut.model_validate(row).model_dump(), "ranges": _active_ranges(db, row.id)}
+
+
+@router.post("/defect-types/with-ranges", response_model=schemas.DefectTypeWithRangesOut)
+def create_defect_type_with_ranges(payload: schemas.DefectTypeWithRangesIn, db: Session = Depends(get_db), _=Depends(require_admin())):
+    return _save_defect_type(db, None, payload)
+
+
+@router.put("/defect-types/{type_id}/with-ranges", response_model=schemas.DefectTypeWithRangesOut)
+def update_defect_type_with_ranges(type_id: UUID, payload: schemas.DefectTypeWithRangesIn, db: Session = Depends(get_db), _=Depends(require_admin())):
+    row = db.query(models.DefectType).get(type_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Defect type not found")
+    return _save_defect_type(db, row, payload)
+
+
 router.include_router(register_crud("defect-types", models.DefectType, schemas.DefectTypeIn, schemas.DefectTypeOut))
 router.include_router(register_crud(
     "defect-range-configs", models.DefectRangeConfig,

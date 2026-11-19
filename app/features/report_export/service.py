@@ -866,7 +866,8 @@ def _gsm(db, plm):
     r = db.query(gsm_models.GsmCheckReport).options(joinedload(gsm_models.GsmCheckReport.rolls)).filter(gsm_models.GsmCheckReport.plm_id == plm.id).first()
     if not r:
         return None
-    stats = gsm_service.compute_report_stats(r.rolls, float(r.standard_gsm or 0), float(r.tolerance_snapshot) if r.tolerance_snapshot is not None else None)
+    std_after = gsm_service.required_after(r)
+    stats = gsm_service.compute_report_stats(r.rolls, float(r.standard_gsm or 0), float(r.tolerance_snapshot) if r.tolerance_snapshot is not None else None, std_after)
     planned = _planned_color_map(plm)
     codes = _plm_colors(plm, [x.color for x in r.rolls] + [r.color] + list(planned.values()))
     report_date = _first_date(
@@ -875,15 +876,16 @@ def _gsm(db, plm):
         getattr(plm, 'received_at', None),
         getattr(plm, 'plm_date', None),
     )
-    info = _table([['Required GSM', _fmt(r.standard_gsm), 'Tolerance', f'±{_fmt(r.tolerance_snapshot)}%', 'Date', report_date]], widths=[30*mm, 24*mm, 24*mm, 24*mm, 20*mm, 32*mm], header_rows=0, font=8)
+    req_text = _fmt(r.standard_gsm) if float(r.standard_gsm or 0) == std_after else f'{_fmt(r.standard_gsm)} / {_fmt(std_after)}'
+    info = _table([['Required GSM', req_text, 'Tolerance', f'±{_fmt(r.tolerance_snapshot)}%', 'Date', report_date]], widths=[30*mm, 24*mm, 24*mm, 24*mm, 20*mm, 32*mm], header_rows=0, font=8)
     std = float(r.standard_gsm or 0)
     tol = float(r.tolerance_snapshot) if r.tolerance_snapshot is not None else None
     flags = []
     for x in r.rolls:
-        for actual in (x.actual_gsm_before, x.actual_gsm_after):
+        for actual, req in ((x.actual_gsm_before, std), (x.actual_gsm_after, std_after)):
             if actual is None:
                 continue
-            pct = gsm_service.over_less_pct(float(actual), std)
+            pct = gsm_service.over_less_pct(float(actual), req)
             flags.append(abs(pct) <= tol if tol is not None and std else None)
     swatches = [
         ('Before Wash', _stage_photo(db, 'gsm_before_wash', r.id, fallback_roll_type='gsm_roll', roll_ids=[x.id for x in r.rolls])),
@@ -901,15 +903,16 @@ def _gsm(db, plm):
             rows.append(x)
         for x in rows:
             actual = x.actual_gsm_after if after else x.actual_gsm_before
-            pct = gsm_service.over_less_pct(float(actual), float(r.standard_gsm or 0))
+            req = std_after if after else float(r.standard_gsm or 0)
+            pct = gsm_service.over_less_pct(float(actual), req)
             rem = x.remarks_after if after else x.remarks_before
-            data.append([x.roll_no, _color_chip(_color_for(plm, x.roll_no, x.color, planned)), _fmt(r.standard_gsm), _fmt(actual), _fmt(pct), _roll_date(x, after=after, report=r, plm=plm), rem or ''])
+            data.append([x.roll_no, _color_chip(_color_for(plm, x.roll_no, x.color, planned)), _fmt(req), _fmt(actual), _fmt(pct), _roll_date(x, after=after, report=r, plm=plm), rem or ''])
         if rows:
             avg = stats['avg_over_less_after_pct' if after else 'avg_over_less_before_pct']
             passed = stats['pass_after' if after else 'pass_before']
             data.append(['AVG', '', '', '', f'{_fmt(avg)}%', '', 'PASS' if passed is True else 'FAIL' if passed is False else ''])
         else:
-            data.append(['—', '', _fmt(r.standard_gsm), '', '', '', 'No data'])
+            data.append(['—', '', _fmt(std_after if after else r.standard_gsm), '', '', '', 'No data'])
         widths = _fit_col_widths([16, 24, 22, 22, 24, 22, 26], _page_content_width())
         return KeepTogether([_section_title(title), Spacer(1, 1.5*mm), _table(data, widths=widths, header_rows=1, font=7.1)])
 
@@ -1056,7 +1059,8 @@ def _relaxation(db, plm):
         ])
     widths = _fit_col_widths([22, 16, 18, 22, 16, 16, 22, 16, 16, 20, 20, 28], _page_content_width(landscape_page=True))
     story += [_table(data, widths=widths, header_rows=1, font=6.2), Spacer(1, 3*mm)]
-    story += [_p(f'Relaxation time (Dashboard): {r.relaxation_hours_snapshot or 12} HOURS', LABEL)]
+    if r.relaxation_hours_snapshot:
+        story += [_p(f'Relaxation time: {r.relaxation_hours_snapshot} HOURS', LABEL)]
     return story, True
 
 

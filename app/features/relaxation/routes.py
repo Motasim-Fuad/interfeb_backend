@@ -45,11 +45,16 @@ def create_report(payload: schemas.ReportCreate, db: Session = Depends(get_db), 
         raise HTTPException(status_code=404, detail="PLM not found")
     existing = db.query(models.FabricRelaxationReport).options(joinedload(models.FabricRelaxationReport.rolls)).filter(models.FabricRelaxationReport.plm_id == plm.id).first()
     if existing:
+        if payload.relaxation_hours:
+            existing.relaxation_hours_snapshot = payload.relaxation_hours
+            db.commit()
+            db.refresh(existing)
         return _hydrate(db, existing)
-    relaxation_hours = get_float_qc_value(plm, "relaxation", "relaxation_hours", 12)
+    # Typed in the app; an optional supplier QC profile value is only a fallback. No fixed 12.
+    relaxation_hours = payload.relaxation_hours or get_float_qc_value(plm, "relaxation", "relaxation_hours", None)
     report = models.FabricRelaxationReport(
-        **payload.model_dump(),
-        relaxation_hours_snapshot=int(relaxation_hours or 12),
+        **payload.model_dump(exclude={"relaxation_hours"}),
+        relaxation_hours_snapshot=int(relaxation_hours) if relaxation_hours else None,
     )
     db.add(report)
     db.commit()
@@ -76,6 +81,22 @@ def get_report(report_id: UUID, db: Session = Depends(get_db)):
     return _hydrate(db, report)
 
 
+@router.patch("/{report_id}", response_model=schemas.ReportOut)
+def update_report(report_id: UUID, payload: schemas.ReportUpdate, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
+    report = db.query(models.FabricRelaxationReport).options(joinedload(models.FabricRelaxationReport.rolls)).get(report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="Report not found")
+    if payload.relaxation_hours is not None:
+        if payload.relaxation_hours <= 0:
+            raise HTTPException(status_code=422, detail="Relaxation time must be greater than 0 hours")
+        report.relaxation_hours_snapshot = payload.relaxation_hours
+    if payload.comments is not None:
+        report.comments = payload.comments
+    db.commit()
+    db.refresh(report)
+    return _hydrate(db, report)
+
+
 @router.post("/{report_id}/rolls", response_model=schemas.RollOut)
 @retry_on_conflict
 def add_roll(report_id: UUID, payload: schemas.RollIn, response: Response, db: Session = Depends(get_db), _=Depends(require_roles("inspection", "worker"))):
@@ -91,6 +112,18 @@ def add_roll(report_id: UUID, payload: schemas.RollIn, response: Response, db: S
     else:
         data = payload.model_dump()
         data["client_updated_at"] = client_stamp(payload.client_updated_at)
+        if payload.after_readings is not None:
+            kept = [r for r in data["after_readings"] if r.get("length") is not None or r.get("width") is not None]
+            data["after_readings"] = kept
+            last = kept[-1] if kept else {}
+            data.update(after_relax_time=last.get("time"), after_relax_length=last.get("length"), after_relax_width=last.get("width"))
+        else:
+            data.pop("after_readings")
+            # Older app builds send one after reading; it replaces the latest stored one.
+            if roll is not None and roll.after_readings and data.get("after_relax_length") is not None:
+                roll.after_readings = roll.after_readings[:-1] + [{"time": data.get("after_relax_time"),
+                                                                    "length": data.get("after_relax_length"),
+                                                                    "width": data.get("after_relax_width")}]
         if roll:
             for k, v in data.items():
                 setattr(roll, k, v)

@@ -30,13 +30,15 @@ class ReportCreate(BaseModel):
     plm_id: UUID
     report_date: Optional[date] = None
     color: Optional[str] = None
-    standard_gsm: Optional[float] = None  # Required GSM entered in the app
+    standard_gsm: Optional[float] = None  # Required GSM (before wash) entered in the app
+    standard_gsm_after: Optional[float] = None  # Required GSM after wash (empty = same as before)
     # Accepted GSM tolerance (%) entered in the app.
     tolerance_percent: Optional[float] = None
 
 
 class ReportUpdate(BaseModel):
     standard_gsm: Optional[float] = None
+    standard_gsm_after: Optional[float] = None
     tolerance_percent: Optional[float] = None
 
 
@@ -46,6 +48,7 @@ class ReportOut(BaseModel):
     report_date: Optional[date] = None
     color: Optional[str] = None
     standard_gsm: Optional[float] = None
+    standard_gsm_after: Optional[float] = None
     tolerance_snapshot: Optional[float] = None
     rolls: List[RollOut] = []
 
