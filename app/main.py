@@ -13,6 +13,7 @@ from app import models_registry  # noqa: F401 - ensures every model is registere
 from app.features.auth.routes import router as auth_router
 from app.features.admin_config.routes import router as admin_config_router
 from app.features.plm.routes import router as plm_router
+from app.features.roll_extract.routes import router as roll_extract_router
 from app.features.store.routes import router as store_router
 from app.features.attachments.routes import router as attachments_router
 from app.features.roll_lock.routes import router as roll_lock_router
@@ -81,7 +82,7 @@ app.include_router(auth_router)
 # Everything except login/health needs a valid session; feature routes add their own role checks on top.
 _authenticated = [Depends(get_current_user)]
 for feature_router in (
-    admin_config_router, plm_router, store_router, attachments_router, roll_lock_router,
+    admin_config_router, roll_extract_router, plm_router, store_router, attachments_router, roll_lock_router,
     fabric_inspection_router, gsm_router, moisture_router, skew_bowing_router, relaxation_router,
     shade_check_router, shrinkage_router, correlation_router, color_continuity_router,
     factory_report_router, inspection_report_router, analytics_router, analytics_hierarchy_router, report_export_router,

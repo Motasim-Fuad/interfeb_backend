@@ -25,6 +25,41 @@ services:
     ports:
       - "6379:6379"
 
+  # Local AI (no API key, nothing leaves the server). Reads mill report photos/scans and
+  # can power the FabriQ chat. CPU-only works; a 16 GB VPS runs the 7B models comfortably.
+  ollama:
+    image: ollama/ollama:0.12.6
+    container_name: interfab-ollama
+    restart: unless-stopped
+    environment:
+      # Keep models in memory so the chat answers fast. 16 GB VPS: set OLLAMA_MAX_LOADED_MODELS=2
+      # in .env so the chat and photo models stay loaded together.
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-24h}
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
+      # Room for a photo plus a long roll table in one answer.
+      OLLAMA_CONTEXT_LENGTH: ${OLLAMA_CONTEXT_LENGTH:-24576}
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - interfab_ollama:/root/.ollama
+
+  # One-shot: downloads the models named in .env (skips ones already present), then exits.
+  ollama-pull:
+    image: ollama/ollama:0.12.6
+    container_name: interfab-ollama-pull
+    restart: "no"
+    depends_on:
+      - ollama
+    env_file:
+      - path: .env.example
+      - path: .env
+        required: false
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    entrypoint: ["/bin/sh", "/pull-models.sh"]
+    volumes:
+      - ./scripts/pull-models.sh:/pull-models.sh:ro
+
   api:
     build: .
     container_name: interfab-api
@@ -51,3 +86,4 @@ services:
 volumes:
   interfab_pg_data:
   interfab_media:
+  interfab_ollama:

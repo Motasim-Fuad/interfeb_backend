@@ -7,6 +7,7 @@ from typing import Optional
 
 import httpx
 
+from app.core.clock import factory_today
 from app.core.config import settings
 
 log = logging.getLogger(__name__)
@@ -28,6 +29,8 @@ def plan_with_llm(message: str, history: list[dict], tools: list[dict], context_
         f"You are {settings.ASSISTANT_NAME}, the assistant inside the Interfab fabric QC admin dashboard. "
         "Always answer data questions by calling exactly one tool; never invent numbers. "
         "Users write English, Bangla or Banglish. Dates are YYYY-MM-DD. "
+        f"Today is {factory_today().isoformat()} (factory time); 'this month', 'ei mase', 'today', 'last week' "
+        "and similar are relative to today. "
         f"Conversation context: {context_hint}"
     )
     messages = [{"role": "system", "content": system}]

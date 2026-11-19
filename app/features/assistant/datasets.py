@@ -49,16 +49,26 @@ def _roll_stats_by(db: Session, group_col, args: dict, only: Optional[list] = No
     return {k: (int(n or 0), int(p or 0), int(f or 0)) for k, n, p, f in q.group_by(group_col).all()}
 
 
+def _points_by(db: Session, group_col, args: dict) -> dict:
+    """Total 4-point defect points per group for the asked period ("most defects")."""
+    q = insights._roll_query(db, group_col, insights.POINTS)
+    q = insights._scope(q, date_from=_d(args.get("date_from")), date_to=_d(args.get("date_to")))
+    return {k: int(v or 0) for k, v in q.group_by(group_col).all()}
+
+
 def ds_buyers(db: Session, args: dict):
     plm_counts = dict(db.query(Plm.buyer_id, func.count(Plm.id)).group_by(Plm.buyer_id).all())
     stats = _roll_stats_by(db, Plm.buyer_id, args)
+    points = _points_by(db, Plm.buyer_id, args)
     rows = []
     for b in db.query(Buyer).order_by(Buyer.name).all():
         n, p, f = stats.get(b.id, (0, 0, 0))
         rows.append({"id": str(b.id), "name": b.name, "status": "Active" if b.is_active else "Inactive",
-                     "plms": plm_counts.get(b.id, 0), "rolls": n, "failed": f, "pass_rate": _rate(p, f)})
+                     "plms": plm_counts.get(b.id, 0), "rolls": n, "failed": f, "pass_rate": _rate(p, f),
+                     "points": points.get(b.id, 0)})
     cols = [col("name", "Buyer"), col("status", "Status", "status"), col("plms", "PLMs", "number"),
-            col("rolls", "Rolls inspected", "number"), col("failed", "Failed", "number"), col("pass_rate", "Pass rate", "percent")]
+            col("rolls", "Rolls inspected", "number"), col("failed", "Failed", "number"), col("pass_rate", "Pass rate", "percent"),
+            col("points", "Defect points", "number")]
     return cols, rows
 
 
@@ -67,17 +77,18 @@ def ds_suppliers(db: Session, args: dict):
     profiles = {sid for (sid,) in db.query(SupplierQcProfile.supplier_id).filter(SupplierQcProfile.is_active.is_(True)).all()}
     scores = {r["supplier_id"]: r for r in insights.supplier_scorecard(
         db, date_from=_d(args.get("date_from")), date_to=_d(args.get("date_to")))}
+    points = _points_by(db, Plm.supplier_id, args)
     rows = []
     for s in db.query(Supplier).order_by(Supplier.name).all():
         sc = scores.get(str(s.id), {})
         rows.append({"id": str(s.id), "name": s.name, "unit": (s.default_measurement_unit or "").upper(),
                      "qc_profile": "Configured" if s.id in profiles else "Missing", "plms": plm_counts.get(s.id, 0),
                      "rolls": sc.get("rolls", 0), "failed": sc.get("failed", 0), "pass_rate": sc.get("pass_rate"),
-                     "grade": sc.get("grade"),
+                     "grade": sc.get("grade"), "points": points.get(s.id, 0),
                      "status": "Active" if s.is_active else "Inactive"})
     cols = [col("name", "Supplier"), col("unit", "Unit"), col("qc_profile", "QC profile", "status"), col("plms", "PLMs", "number"),
             col("rolls", "Rolls inspected", "number"), col("failed", "Failed", "number"), col("pass_rate", "Pass rate", "percent"),
-            col("grade", "Grade", "grade"), col("status", "Status", "status")]
+            col("points", "Defect points", "number"), col("grade", "Grade", "grade"), col("status", "Status", "status")]
     return cols, rows
 
 

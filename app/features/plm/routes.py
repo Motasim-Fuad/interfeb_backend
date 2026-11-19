@@ -488,6 +488,32 @@ def update_roll(roll_id: UUID, payload: schemas.PlmRollUpdate, db: Session = Dep
     return roll
 
 
+@router.delete("/rolls/{roll_id}", status_code=204)
+def delete_roll(roll_id: UUID, db: Session = Depends(get_db), user: CurrentUser = Depends(require_admin())):
+    """Removes a planned roll (e.g. a wrong line from a mill report). A roll the app has already
+    inspected (4-point) keeps its plan, so its report and correlation stay intact."""
+    from app.features.fabric_inspection.models import FabricInspectionReport, FabricInspectionRoll
+
+    roll = db.query(models.PlmRoll).get(roll_id)
+    if not roll:
+        raise HTTPException(status_code=404, detail="Roll not found")
+    color = db.query(models.PlmColor).get(roll.plm_color_id)
+    inspected = (
+        db.query(FabricInspectionRoll.id)
+        .join(FabricInspectionReport, FabricInspectionRoll.report_id == FabricInspectionReport.id)
+        .filter(FabricInspectionReport.plm_id == color.plm_id, FabricInspectionRoll.roll_no == roll.roll_no)
+        .first()
+    )
+    if inspected:
+        raise HTTPException(status_code=409, detail=f"Roll {roll.roll_no} is already inspected in the app, so it cannot be deleted.")
+    db.delete(roll)
+    db.flush()
+    record_audit(db, user, action="planned_roll_deleted", entity_type="plm_roll", entity_id=roll.id,
+                 plm_id=color.plm_id, summary=f"Planned roll {roll.roll_no} ({color.colour_code}) deleted")
+    db.commit()
+    return Response(status_code=204)
+
+
 @router.get("", response_model=List[schemas.PlmOut])
 def list_plms(
     response: Response,

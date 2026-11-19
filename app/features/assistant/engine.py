@@ -1,8 +1,9 @@
 """FabriQ conversation engine.
 
-Planning order: optional LLM planner -> deterministic domain rules -> vector intent search
--> follow-up on the previous turn. Every answer is produced by a backend tool, so the
-numbers are identical whichever planner picked the tool."""
+Planning order: deterministic domain rules -> vector intent search -> follow-up on the
+previous turn -> optional LLM planner (only for questions the rules did not understand).
+Every answer is produced by a backend tool, so the numbers are identical whichever planner
+picked the tool."""
 import logging
 import re
 from collections import defaultdict
@@ -25,7 +26,7 @@ _FOLLOW_UP = r"\b(these|those|them|this|ei|egula|oigula|oi|shudhu|sudhu|only|jus
 _DATA_INTENTS = {"overview", "list_plms", "list_rolls", "defect_pareto", "supplier_scorecard", "trend", "list_schedules",
                  "list_consignments", "list_buyers", "list_suppliers"}
 _INTENT_MIN_SCORE = 0.42
-_IDENTITY = (r"your\s+name|who\s+are\s+you|what\s+are\s+you|introduce\s+yourself|who\s+made\s+you|tomar\s+nam|apnar\s+nam|"
+_IDENTITY = (r"your\s+name|who\s+are\s+you|what\s+are\s+you|introduce\s+yourself|who\s+made\s+you|tomar\s+naa?m|apnar\s+naa?m|tmr\s+naa?m|"
              r"\btumi\s+ke\b|\bapni\s+ke\b|তোমার নাম|আপনার নাম|তুমি কে|আপনি কে")
 _GENERIC = {"what", "is", "the", "a", "an", "how", "does", "do", "to", "of", "in", "on", "for", "me", "my", "your", "you", "i",
             "show", "list", "give", "tell", "ki", "er", "ar", "count", "all", "please", "can", "are", "it", "this", "that"}
@@ -155,13 +156,40 @@ def _resolve_llm_args(db: Session, args: dict, slots: nlu.Slots) -> dict:
             hits = vector_store.search(db, str(name), ["entity"], k=1, ref_type=ref_type)
             if hits and hits[0].score >= 0.45:
                 out[f"{ref_type}_id"], out[f"{ref_type}_name"] = hits[0].ref_id, hits[0].title
-    for key in ("date_from", "date_to", "module", "is_pass", "disposition", "schedule_status"):
-        if args.get(key) not in (None, ""):
+    for key in ("date_from", "date_to"):
+        value = str(args.get(key) or "")
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value) and key not in out:
+            out[key] = value
+    if isinstance(args.get("is_pass"), bool) and "is_pass" not in out:
+        out["is_pass"] = args["is_pass"]
+    if str(args.get("disposition") or "").lower() in _DISPOSITIONS and "disposition" not in out:
+        out["disposition"] = str(args["disposition"]).lower()
+    for key in ("module", "schedule_status"):
+        if args.get(key) not in (None, "") and key not in out:
             out[key] = args[key]
     return out
 
 
 _LLM_OPS = {"count", "list", "sum", "avg", "max", "min", "best", "worst"}
+_DISPOSITIONS = {"pending", "accepted", "hold", "rejected", "claim"}
+
+
+def _plan_with_llm(db: Session, message: str, history: list[dict], prev_tool, prev_args: dict, slots: nlu.Slots, text: str):
+    if not llm.llm_enabled():
+        return None
+    hint = f"previous tool={prev_tool} args={prev_args}" if prev_tool else "new conversation"
+    decision = llm.plan_with_llm(message, history, llm_tool_specs() + [_QUERY_SPEC], hint)
+    if decision and decision.get("tool") in ALL_TOOLS:
+        raw = dict(decision.get("args") or {})
+        args = _resolve_llm_args(db, raw, slots)
+        if decision["tool"] == "query":
+            dataset = raw.get("dataset") if raw.get("dataset") in DATASETS else "plms"
+            op = raw.get("op") if raw.get("op") in _LLM_OPS else "count"
+            args.update({"dataset": dataset, "op": op, "question": f"{raw.get('metric', '')} {text}".lower()})
+        return decision["tool"], args, slots, "llm"
+    if decision and decision.get("reply"):
+        return "_llm_reply", {"text": decision["reply"]}, slots, "llm"
+    return None
 
 
 def plan(db: Session, message: str, context: dict, history: list[dict]) -> tuple[str, dict, nlu.Slots, str]:
@@ -170,20 +198,6 @@ def plan(db: Session, message: str, context: dict, history: list[dict]) -> tuple
     prev_tool, prev_args = context.get("tool"), dict(context.get("args") or {})
     filters = slots.filters()
     text = slots.text or message
-
-    if llm.llm_enabled():
-        hint = f"previous tool={prev_tool} args={prev_args}" if prev_tool else "new conversation"
-        decision = llm.plan_with_llm(message, history, llm_tool_specs() + [_QUERY_SPEC], hint)
-        if decision and decision.get("tool") in ALL_TOOLS:
-            raw = dict(decision.get("args") or {})
-            args = _resolve_llm_args(db, raw, slots)
-            if decision["tool"] == "query":
-                dataset = raw.get("dataset") if raw.get("dataset") in DATASETS else "plms"
-                op = raw.get("op") if raw.get("op") in _LLM_OPS else "count"
-                args.update({"dataset": dataset, "op": op, "question": f"{raw.get('metric', '')} {text}".lower()})
-            return decision["tool"], args, slots, "llm"
-        if decision and decision.get("reply"):
-            return "_llm_reply", {"text": decision["reply"]}, slots, "llm"
 
     code = _CODE.search(message)
     if code and not (slots.entities.get("plm") or slots.entities.get("consignment")):
@@ -201,6 +215,11 @@ def plan(db: Session, message: str, context: dict, history: list[dict]) -> tuple
         if vtool and score >= _INTENT_MIN_SCORE:
             tool, planner = vtool, "vector"
     if not tool:
+        # The built-in rules understood nothing: only now ask the AI to pick a tool. The rules are
+        # exact for the questions they know, while a small local model guesses dates and filters.
+        llm_plan = _plan_with_llm(db, message, history, prev_tool, prev_args, slots, text)
+        if llm_plan:
+            return llm_plan
         return "_fallback", {}, slots, "none"
 
     args = dict(filters)

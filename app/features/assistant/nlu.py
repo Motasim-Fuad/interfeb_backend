@@ -104,20 +104,20 @@ def parse_dates(msg: str, slots: Slots, today: Optional[date] = None) -> None:
         n, unit = int(match.group(1)), match.group(2)
         days = n * 7 if unit in ("week", "soptah", "সপ্তাহ") else n * 30 if unit in ("month", "mash", "mas", "মাস") else n
         return setr(today - timedelta(days=days - 1), today, f"last {n} {unit}")
-    if re.search(r"this\s*week|\b(ei|ai)\s*soptah|এই সপ্তাহ", m):
+    if re.search(r"this\s*week|\b(ei|ai)\s*soptah(e|er)?|এই সপ্তাহ", m):
         start = today - timedelta(days=today.weekday())
         return setr(start, today, "this week")
     if re.search(r"last\s*week|gato\s*soptah|গত সপ্তাহ", m):
         start = today - timedelta(days=today.weekday() + 7)
         return setr(start, start + timedelta(days=6), "last week")
-    if re.search(r"last\s*month|previous\s*month|got[oa]\s*mash|gotomash|ager\s*mash|গত মাস", m):
+    if re.search(r"last\s*month|previous\s*month|got[oa]\s*ma(sh|s|se|she)|gotomash|gotomase|ager\s*ma(sh|s|se|she)|গত মাস", m):
         first = today.replace(day=1) - timedelta(days=1)
         a, b = _month_range(first.year, first.month)
         return setr(a, b, first.strftime("%B %Y"))
-    if re.search(r"this\s*month|\b(ei|ai|ey|e)\s*(mash|mas|masher|maser)\b|চলতি মাস|এই মাস|current month", m):
+    if re.search(r"this\s*month|\b(ei|ai|ey|e)\s*(mash|mas|mase|mashe|masher|maser|mashe?r?)\b|chol[ot]i\s*mash?e?|চলতি মাস|এই মাস|current month", m):
         a, b = _month_range(today.year, today.month)
         return setr(a, b, today.strftime("%B %Y"))
-    if re.search(r"this\s*year|\b(ei|ai)\s*(bochor|bochorer)|এই বছর", m):
+    if re.search(r"this\s*year|\b(ei|ai)\s*(bochor|bochore|bochorer)|এই বছর", m):
         return setr(date(today.year, 1, 1), today, str(today.year))
     if re.search(r"last\s*year|got[oa]\s*bochor|গত বছর", m):
         return setr(date(today.year - 1, 1, 1), date(today.year - 1, 12, 31), str(today.year - 1))

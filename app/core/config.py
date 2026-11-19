@@ -68,6 +68,17 @@ class Settings(BaseSettings):
     ASSISTANT_EMBEDDER: str = "hash"
     ASSISTANT_EMBED_MODEL: str = "text-embedding-3-small"
 
+    # Mill report reader: any OpenAI-compatible vision endpoint (local Ollama by default).
+    VISION_LLM_BASE_URL: str = ""
+    VISION_LLM_API_KEY: str = ""
+    VISION_LLM_MODEL: str = ""
+    VISION_LLM_TIMEOUT_SECONDS: float = 120.0
+    # Used when the main reader fails (no key, offline, free-tier limit) — the local Ollama model.
+    VISION_FALLBACK_BASE_URL: str = ""
+    VISION_FALLBACK_API_KEY: str = ""
+    VISION_FALLBACK_MODEL: str = ""
+    VISION_FALLBACK_TIMEOUT_SECONDS: float = 1800.0
+
     class Config:
         env_file = ".env"
         case_sensitive = True

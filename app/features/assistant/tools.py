@@ -419,7 +419,14 @@ def tool_supplier_scorecard(db: Session, a: dict, lang: str) -> Reply:
         return Reply(tr(lang, "No inspected rolls yet, so no supplier scores.", "এখনো কোনো রোল ইন্সপেক্ট হয়নি, তাই স্কোর নেই।"))
     rows = page["rows"]
     best, worst = rows[0], rows[-1]
-    text = tr(lang, f"Best supplier: **{best['name']}** (grade {best['grade']}, score {best['score']}). "
+    if len(rows) == 1:
+        text = tr(lang, f"Only **{best['name']}** has inspected rolls in this period: grade {best['grade']}, score {best['score']}, "
+                        f"pass rate {_fmt_pct(best['pass_rate'])}.",
+                  f"এই সময়ে শুধু **{best['name']}** এর রোল ইন্সপেক্ট হয়েছে: গ্রেড {best['grade']}, স্কোর {best['score']}, "
+                  f"পাস রেট {_fmt_pct(best['pass_rate'])}।")
+    else:
+        text = None
+    text = text or tr(lang, f"Best supplier: **{best['name']}** (grade {best['grade']}, score {best['score']}). "
                     f"Needs attention: **{worst['name']}** (grade {worst['grade']}, pass rate {_fmt_pct(worst['pass_rate'])}).",
               f"সেরা সাপ্লায়ার: **{best['name']}** (গ্রেড {best['grade']}, স্কোর {best['score']})। "
               f"নজর দরকার: **{worst['name']}** (গ্রেড {worst['grade']}, পাস রেট {_fmt_pct(worst['pass_rate'])})।")

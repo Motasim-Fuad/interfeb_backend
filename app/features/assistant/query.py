@@ -80,7 +80,7 @@ METRICS = [
     ("planned_rolls", r"planned"),
     ("score", r"\bscores?\b|স্কোর"),
     ("failed", r"\bfail(ed|ure|s)?\b|ফেল"),
-    ("points", r"\bpoints?\b|পয়েন্ট"),
+    ("points", r"\bpoints?\b|পয়েন্ট|\bdefects?\b|ডিফেক্ট|ত্রুটি"),
     ("quantity", r"quantity|\bqty\b|yards?|meters?"),
     ("gsm_tolerance", r"tolerance"),
     ("gsm", r"\bgsm\b"),
@@ -223,6 +223,20 @@ def tool_query(db: Session, a: dict, lang: str) -> Reply:
     match = a.get("match") or _facet_filters(text, full["rows"], columns, skip_pass=metric == "pass_rate" or "is_pass" in base)
     args = {**base, **({"match": match} if match else {})}
     rows = run_dataset(db, dataset, args, limit=5000)["rows"]
+    # "Alpha Mills er pass rate koto": a named supplier/buyer narrows its own list to that one row.
+    entity_key = {"suppliers": "supplier_id", "buyers": "buyer_id"}.get(dataset)
+    if entity_key and base.get(entity_key):
+        rows = [r for r in rows if r.get("id") == str(base[entity_key])]
+        if len(rows) == 1 and metric and op not in ("max", "min", "best", "worst"):
+            r = rows[0]
+            kinds = {c["key"]: c["kind"] for c in columns}
+            labels = {c["key"]: c["label"] for c in columns}
+            scope = _scope_label(a, lang)
+            text_out = tr(lang, f"**{r['name']}** — {labels[metric]} ({scope}): **{_fmt(r.get(metric), kinds[metric])}**"
+                                f" ({r.get('rolls', 0)} rolls inspected).",
+                          f"**{r['name']}** — {labels[metric]} ({scope}): **{_fmt(r.get(metric), kinds[metric])}**"
+                          f" ({r.get('rolls', 0)}টি রোল ইন্সপেক্ট)।")
+            return _with_table(db, dataset, args, rows, columns, text_out, lang, sort=None)
     total = len(rows)
     label_en, label_bn = SUBJECT_LABELS.get(dataset, (dataset, dataset))
     scope = _scope_label(a, lang)

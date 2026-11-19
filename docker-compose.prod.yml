@@ -1,0 +1,26 @@
+# VPS / production overrides. Use together with docker-compose.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+# Differences from local: no source mount, no --reload, several workers, DB/Redis not exposed.
+services:
+  db:
+    ports: !reset []
+
+  redis:
+    ports: !reset []
+
+  api:
+    volumes: !reset
+      - interfab_media:/app/media
+    environment:
+      ENV: production
+      DEBUG: "false"
+    command: >
+      sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000
+      --workers ${WEB_CONCURRENCY:-2} --proxy-headers --forwarded-allow-ips='*'"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+      ollama:
+        condition: service_started
